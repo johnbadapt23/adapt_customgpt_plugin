@@ -2,8 +2,8 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.2.0
- * Author: John
+ * Version: 2.2.1
+ * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
 
@@ -75,6 +75,9 @@ final class CustomGPT_Chat_Widget_Plugin {
 		add_action( 'admin_menu', array( $this, 'register_settings_page' ) );
 		add_action( 'admin_init', array( $this, 'register_settings' ) );
 
+		// "Settings" link on the Plugins list row, next to Deactivate.
+		add_filter( 'plugin_action_links_' . plugin_basename( __FILE__ ), array( $this, 'add_settings_action_link' ) );
+
 		// LCP: start fetching the JS/CSS bundle the moment the browser
 		// sees <head>, instead of waiting until it reaches wp_footer
 		// (where the actual <script>/<link> tags still live - this only
@@ -107,6 +110,16 @@ final class CustomGPT_Chat_Widget_Plugin {
 			return CUSTOMGPT_WIDGET_API_KEY;
 		}
 		return get_option( 'customgpt_widget_api_key', '' );
+	}
+
+	/**
+	 * Prepends a "Settings" link to this plugin's row on the Plugins
+	 * list page, pointing at Settings -> CustomGPT Chat Widget.
+	 */
+	public function add_settings_action_link( $links ) {
+		$settings_link = '<a href="' . esc_url( admin_url( 'options-general.php?page=customgpt-chat-widget' ) ) . '">Settings</a>';
+		array_unshift( $links, $settings_link );
+		return $links;
 	}
 
 	public function register_settings_page() {
