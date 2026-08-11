@@ -1,0 +1,1129 @@
+<?php
+/**
+ * Plugin Name: CustomGPT Chat Widget
+ * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
+ * Version: 2.2.0
+ * Author: John
+ * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
+ */
+
+if ( ! defined( 'ABSPATH' ) ) {
+	exit; // No direct access.
+}
+
+/*
+ * Credentials.
+ *
+ * The API key is only ever used server-side, inside
+ * CustomGPT_Chat_Widget_Plugin::handle_proxy(). It is never printed
+ * into a <script> tag or sent to the browser.
+ *
+ * This plugin's source lives in a public GitHub repo, so there is no
+ * hardcoded key/agent-id here (anything in this file is publicly
+ * readable). Configure both under Settings -> CustomGPT Chat Widget
+ * in wp-admin (stored in this site's options table, never committed
+ * to the repo). Power users can still override either one with a
+ * wp-config.php constant (takes precedence over the settings page):
+ *   define( 'CUSTOMGPT_WIDGET_AGENT_ID', '98865' );
+ *   define( 'CUSTOMGPT_WIDGET_API_KEY', '10769|...' );
+ *
+ * If neither source has a value, the shortcode shows an admin-only
+ * notice instead of silently failing or falling back to a shared key.
+ */
+if ( ! defined( 'CUSTOMGPT_API_BASE' ) ) {
+	define( 'CUSTOMGPT_API_BASE', 'https://app.customgpt.ai/api/v1' );
+}
+
+/*
+ * Update checker.
+ *
+ * Hooks this plugin into WordPress's normal "Update available" UI on
+ * the Plugins screen, sourced from git tags on the GitHub repo below
+ * instead of wordpress.org. To ship a new version to every site that
+ * has this installed: bump the Version header above, commit, then
+ * `git tag vX.Y.Z && git push --tags`. No further action needed on
+ * any individual site - each one checks the repo on its own schedule
+ * (roughly every 12 hours) and shows the update like any other plugin.
+ */
+if ( file_exists( __DIR__ . '/plugin-update-checker/plugin-update-checker.php' ) ) {
+	require_once __DIR__ . '/plugin-update-checker/plugin-update-checker.php';
+	$customgpt_widget_update_checker = YahnisElsts\PluginUpdateChecker\v5\PucFactory::buildUpdateChecker(
+		'https://github.com/johnbadapt23/adapt_customgpt_plugin',
+		__FILE__,
+		'customgpt-chat-widget'
+	);
+	$customgpt_widget_update_checker->setBranch( 'main' );
+}
+
+final class CustomGPT_Chat_Widget_Plugin {
+
+	private static $instance_count               = 0;
+	private static $script_enqueued              = false;
+	private static $active_class_wired           = false;
+	private static $hero_placeholder_style_wired = false;
+
+	public function __construct() {
+		add_shortcode( 'customgpt_chat', array( $this, 'render_shortcode' ) );
+
+		// Server-side proxy: browser never sees CUSTOMGPT_WIDGET_API_KEY.
+		add_action( 'wp_ajax_customgpt_proxy', array( $this, 'handle_proxy' ) );
+		add_action( 'wp_ajax_nopriv_customgpt_proxy', array( $this, 'handle_proxy' ) );
+
+		add_action( 'admin_notices', array( $this, 'maybe_show_missing_dist_notice' ) );
+		add_action( 'admin_notices', array( $this, 'maybe_show_missing_credentials_notice' ) );
+
+		add_action( 'admin_menu', array( $this, 'register_settings_page' ) );
+		add_action( 'admin_init', array( $this, 'register_settings' ) );
+
+		// LCP: start fetching the JS/CSS bundle the moment the browser
+		// sees <head>, instead of waiting until it reaches wp_footer
+		// (where the actual <script>/<link> tags still live - this only
+		// front-loads the network request). Only relevant when the
+		// widget is genuinely on this page, so it's gated on
+		// has_shortcode() against the raw post content - see
+		// maybe_print_resource_hints().
+		add_action( 'wp_head', array( $this, 'maybe_print_resource_hints' ), 1 );
+	}
+
+	/**
+	 * Effective agent ID: a wp-config.php constant (if a site owner set
+	 * one) always wins over the settings-page value, so power users can
+	 * still pin it outside the database. Falls back to the option saved
+	 * via Settings -> CustomGPT Chat Widget, then '' if neither is set.
+	 */
+	private function get_agent_id() {
+		if ( defined( 'CUSTOMGPT_WIDGET_AGENT_ID' ) && '' !== CUSTOMGPT_WIDGET_AGENT_ID ) {
+			return CUSTOMGPT_WIDGET_AGENT_ID;
+		}
+		return get_option( 'customgpt_widget_agent_id', '' );
+	}
+
+	/**
+	 * Effective API key - same precedence as get_agent_id() above.
+	 * Only ever read server-side (handle_proxy(), fetch_agent_settings_cached()).
+	 */
+	private function get_api_key() {
+		if ( defined( 'CUSTOMGPT_WIDGET_API_KEY' ) && '' !== CUSTOMGPT_WIDGET_API_KEY ) {
+			return CUSTOMGPT_WIDGET_API_KEY;
+		}
+		return get_option( 'customgpt_widget_api_key', '' );
+	}
+
+	public function register_settings_page() {
+		add_options_page(
+			'CustomGPT Chat Widget',
+			'CustomGPT Chat Widget',
+			'manage_options',
+			'customgpt-chat-widget',
+			array( $this, 'render_settings_page' )
+		);
+	}
+
+	public function register_settings() {
+		register_setting(
+			'customgpt_chat_widget_settings',
+			'customgpt_widget_agent_id',
+			array(
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_text_field',
+				'default'           => '',
+			)
+		);
+		register_setting(
+			'customgpt_chat_widget_settings',
+			'customgpt_widget_api_key',
+			array(
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_text_field',
+				'default'           => '',
+			)
+		);
+
+		add_settings_section( 'customgpt_chat_widget_main', '', '__return_false', 'customgpt-chat-widget' );
+
+		add_settings_field(
+			'customgpt_widget_agent_id',
+			'Agent ID',
+			array( $this, 'render_agent_id_field' ),
+			'customgpt-chat-widget',
+			'customgpt_chat_widget_main'
+		);
+		add_settings_field(
+			'customgpt_widget_api_key',
+			'API Key',
+			array( $this, 'render_api_key_field' ),
+			'customgpt-chat-widget',
+			'customgpt_chat_widget_main'
+		);
+	}
+
+	public function render_agent_id_field() {
+		$locked = defined( 'CUSTOMGPT_WIDGET_AGENT_ID' ) && '' !== CUSTOMGPT_WIDGET_AGENT_ID;
+		$value  = $locked ? CUSTOMGPT_WIDGET_AGENT_ID : get_option( 'customgpt_widget_agent_id', '' );
+		printf(
+			'<input type="text" name="customgpt_widget_agent_id" value="%s" class="regular-text" placeholder="e.g. 98865" %s />',
+			esc_attr( $value ),
+			$locked ? 'disabled' : ''
+		);
+		if ( $locked ) {
+			echo '<p class="description">Locked by a CUSTOMGPT_WIDGET_AGENT_ID constant in wp-config.php. Remove it there to manage this from here instead.</p>';
+		} else {
+			echo '<p class="description">The project/agent ID from your CustomGPT dashboard URL.</p>';
+		}
+	}
+
+	public function render_api_key_field() {
+		$locked = defined( 'CUSTOMGPT_WIDGET_API_KEY' ) && '' !== CUSTOMGPT_WIDGET_API_KEY;
+		$value  = $locked ? CUSTOMGPT_WIDGET_API_KEY : get_option( 'customgpt_widget_api_key', '' );
+		printf(
+			'<input type="password" name="customgpt_widget_api_key" value="%s" class="regular-text" autocomplete="new-password" %s />',
+			esc_attr( $value ),
+			$locked ? 'disabled' : ''
+		);
+		if ( $locked ) {
+			echo '<p class="description">Locked by a CUSTOMGPT_WIDGET_API_KEY constant in wp-config.php. Remove it there to manage this from here instead.</p>';
+		} else {
+			echo '<p class="description">Find this under API Keys in your CustomGPT dashboard. Only ever used server-side - never sent to the browser.</p>';
+		}
+	}
+
+	public function render_settings_page() {
+		if ( ! current_user_can( 'manage_options' ) ) {
+			return;
+		}
+		?>
+		<div class="wrap">
+			<h1>CustomGPT Chat Widget</h1>
+			<p>Configure the credentials used by the <code>[customgpt_chat]</code> shortcode. These are saved to this site's database and are never included in the plugin's git repo.</p>
+			<form method="post" action="options.php">
+				<?php
+				settings_fields( 'customgpt_chat_widget_settings' );
+				do_settings_sections( 'customgpt-chat-widget' );
+				submit_button();
+				?>
+			</form>
+		</div>
+		<?php
+	}
+
+	public function maybe_show_missing_credentials_notice() {
+		if ( '' !== $this->get_agent_id() && '' !== $this->get_api_key() ) {
+			return;
+		}
+		?>
+		<div class="notice notice-warning">
+			<p>
+				<strong>CustomGPT Chat Widget:</strong>
+				Agent ID and/or API key are not configured, so <code>[customgpt_chat]</code> won't render anything on the front end.
+				<a href="<?php echo esc_url( admin_url( 'options-general.php?page=customgpt-chat-widget' ) ); ?>">Set them here</a>.
+			</p>
+		</div>
+		<?php
+	}
+
+	/**
+	 * True if the current request's post content contains the shortcode.
+	 * wp_head runs before the shortcode itself is ever processed (that
+	 * happens later, inline with the_content()), so this is the only
+	 * reliable way to know from wp_head whether preloading is worth it.
+	 * Won't catch the shortcode if it's injected via a widget/template
+	 * rather than post content - preloading simply won't fire in that
+	 * case, same as if the plugin weren't optimized for it at all.
+	 */
+	private function page_has_shortcode() {
+		global $post;
+		return $post instanceof WP_Post && has_shortcode( $post->post_content, 'customgpt_chat' );
+	}
+
+	/**
+	 * Preloads the three largest, always-required assets (vendors
+	 * bundle, main widget bundle, stylesheet) so the browser starts
+	 * downloading them immediately rather than discovering them only
+	 * once it reaches the wp_footer <script> tags. Doesn't preload the
+	 * *.chunk.js files - there can be over a dozen of them and most
+	 * exist for the rarely-used voice feature, so preloading all of
+	 * them would compete for bandwidth with these three higher-value
+	 * requests instead of helping.
+	 */
+	public function maybe_print_resource_hints() {
+		if ( ! $this->page_has_shortcode() ) {
+			return;
+		}
+		if ( ! file_exists( $this->widget_js_path() ) ) {
+			return;
+		}
+
+		if ( file_exists( $this->vendors_js_path() ) ) {
+			printf(
+				'<link rel="preload" as="script" fetchpriority="high" href="%s" />' . "\n",
+				esc_url( $this->vendors_js_url() )
+			);
+		}
+		printf(
+			'<link rel="preload" as="script" fetchpriority="high" href="%s" />' . "\n",
+			esc_url( $this->widget_js_url() )
+		);
+		if ( file_exists( $this->widget_css_path() ) ) {
+			printf(
+				'<link rel="preload" as="style" href="%s" />' . "\n",
+				esc_url( $this->widget_css_url() )
+			);
+		}
+	}
+
+	/**
+	 * Absolute filesystem path to the self-hosted widget bundle.
+	 * You build this by running, in a clone of
+	 * github.com/Poll-The-People/customgpt-starter-kit:
+	 *   npm install
+	 *   npm run build:widget
+	 * then copying the resulting dist/widget/ folder here so it sits
+	 * at customgpt-chat-widget/dist/widget/customgpt-widget.b16.min.js
+	 * (customgpt-widget.js, vendors.js, and customgpt-widget.css must
+	 * all stay in that same folder together — the JS loads the others
+	 * relative to its own URL at runtime).
+	 */
+	private function widget_js_path() {
+		return plugin_dir_path( __FILE__ ) . 'dist/widget/customgpt-widget.b16.min.js';
+	}
+
+	private function vendors_js_path() {
+		return plugin_dir_path( __FILE__ ) . 'dist/widget/vendors.b16.min.js';
+	}
+
+	private function widget_css_path() {
+		return plugin_dir_path( __FILE__ ) . 'dist/widget/customgpt-widget.b16.min.css';
+	}
+
+	/**
+	 * Appends a `?ver=<file mtime>` cache-busting query string to an
+	 * asset URL. The dist/widget/*.js and *.css files are served with a
+	 * far-future Cache-Control (max-age=31536000, i.e. one year) by the
+	 * hosting/CDN layer, and their filenames never change between
+	 * builds - so without this, browsers (and any CDN edge cache in
+	 * front of the site) will keep serving a stale, pre-update copy
+	 * indefinitely after every `npm run build:widget` + re-upload,
+	 * until someone manually hard-refreshes or purges cache. Changing
+	 * the URL itself on every file change is the standard fix (this is
+	 * exactly what wp_enqueue_script()'s own $ver argument normally
+	 * does - we're doing it by hand here because these tags are printed
+	 * directly rather than going through wp_enqueue_script()).
+	 */
+	private function versioned_url( $url, $path ) {
+		$mtime = file_exists( $path ) ? filemtime( $path ) : time();
+		return add_query_arg( 'ver', $mtime, $url );
+	}
+
+	private function widget_js_url() {
+		return $this->versioned_url( plugins_url( 'dist/widget/customgpt-widget.b16.min.js', __FILE__ ), $this->widget_js_path() );
+	}
+
+	private function vendors_js_url() {
+		return $this->versioned_url( plugins_url( 'dist/widget/vendors.b16.min.js', __FILE__ ), $this->vendors_js_path() );
+	}
+
+	private function widget_css_url() {
+		return $this->versioned_url( plugins_url( 'dist/widget/customgpt-widget.b16.min.css', __FILE__ ), $this->widget_css_path() );
+	}
+
+	public function maybe_show_missing_dist_notice() {
+		if ( file_exists( $this->widget_js_path() ) ) {
+			return;
+		}
+		?>
+		<div class="notice notice-warning">
+			<p>
+				<strong>CustomGPT Chat Widget:</strong>
+				<?php echo esc_html( 'dist/widget/customgpt-widget.b16.min.js not found. Build the widget (npm run build:widget in the customgpt-starter-kit repo) and copy dist/widget/ into this plugin\'s folder, next to this file, before the [customgpt_chat] shortcode will render anything.' ); ?>
+			</p>
+		</div>
+		<?php
+	}
+
+	/**
+	 * Server-side fetch of GET /projects/{id}/settings, cached in a
+	 * transient for 5 minutes so this only means an extra CustomGPT API
+	 * round trip once every 5 minutes site-wide (shared across all
+	 * visitors), not on every single page load.
+	 *
+	 * Originally the SSR placeholder below just printed hardcoded
+	 * fallback copy, on the theory that fetching real settings
+	 * server-side would add latency and work against LCP. In practice
+	 * the client-side widget was ALREADY doing this exact fetch itself
+	 * after mount (confirmed via the network panel: a real GET to
+	 * .../settings before the example-question pills fill in) - so that
+	 * round trip was happening regardless, just late enough to be
+	 * visible as empty/skeleton pills. Caching it server-side and
+	 * reusing the result removes the visible wait rather than just
+	 * relocating it.
+	 *
+	 * A failed/slow fetch is cached too (briefly), so a down or slow
+	 * CustomGPT API can't add multi-second latency to every page load
+	 * until it recovers - callers get null back and fall back to the
+	 * hardcoded copy, same as before this existed.
+	 */
+	private function fetch_agent_settings_cached( $agent_id ) {
+		$cache_key = 'customgpt_widget_settings_' . $agent_id;
+		$cached    = get_transient( $cache_key );
+		if ( false !== $cached ) {
+			return $cached ? $cached : null;
+		}
+
+		$api_key = $this->get_api_key();
+		if ( empty( $api_key ) ) {
+			return null;
+		}
+
+		$response = wp_remote_get(
+			CUSTOMGPT_API_BASE . '/projects/' . rawurlencode( (string) $agent_id ) . '/settings',
+			array(
+				'headers' => array(
+					'Authorization' => 'Bearer ' . $api_key,
+					'Accept'        => 'application/json',
+				),
+				'timeout' => 3,
+			)
+		);
+
+		if ( is_wp_error( $response ) || 200 !== wp_remote_retrieve_response_code( $response ) ) {
+			set_transient( $cache_key, array(), MINUTE_IN_SECONDS );
+			return null;
+		}
+
+		$body = json_decode( wp_remote_retrieve_body( $response ), true );
+		$data = isset( $body['data'] ) && is_array( $body['data'] ) ? $body['data'] : $body;
+
+		if ( ! is_array( $data ) ) {
+			set_transient( $cache_key, array(), MINUTE_IN_SECONDS );
+			return null;
+		}
+
+		$settings = array(
+			'example_questions'        => isset( $data['example_questions'] ) && is_array( $data['example_questions'] )
+				? array_values( array_slice( $data['example_questions'], 0, 3 ) )
+				: array(),
+			'default_prompt'           => isset( $data['default_prompt'] ) ? (string) $data['default_prompt'] : '',
+			'try_asking_questions_msg' => isset( $data['try_asking_questions_msg'] ) ? (string) $data['try_asking_questions_msg'] : '',
+		);
+
+		set_transient( $cache_key, $settings, 5 * MINUTE_IN_SECONDS );
+		return $settings;
+	}
+
+	/**
+	 * Static HTML (+ inline critical CSS, printed once) matching the
+	 * widget's own initial hero screen - heading, tagline, input shell,
+	 * three prompt pills. Printed directly inside the shortcode's
+	 * container div, so it paints as part of the page's initial HTML
+	 * instead of waiting on the ~2MB JS bundle to download, execute,
+	 * and mount React. This IS the actual LCP fix: the preload hints in
+	 * maybe_print_resource_hints() only make the bundle arrive sooner,
+	 * they don't remove the dependency on it.
+	 *
+	 * $settings is whatever fetch_agent_settings_cached() returned (or
+	 * null on a cache miss/failed fetch) - when real example questions
+	 * are available they're printed as real text instead of the empty
+	 * pulsing skeleton pills, and the tagline/placeholder use the
+	 * agent's actual current dashboard copy instead of hardcoded
+	 * fallback strings.
+	 *
+	 * React replaces this element's contents outright once it mounts
+	 * (no hydration/reconciliation against it). Also prints a small
+	 * inline script setting window.__cgpt_prefetched_settings, which a
+	 * matching patch in the widget bundle checks before making its own
+	 * settings fetch - when this data is already here, it skips that
+	 * fetch (and the skeleton-pill state) entirely instead of the
+	 * placeholder's real content being replaced by a skeleton flash
+	 * while React re-fetches the same thing.
+	 */
+	private function render_hero_placeholder_html( $atts, $settings ) {
+		ob_start();
+
+		if ( ! self::$hero_placeholder_style_wired ) {
+			self::$hero_placeholder_style_wired = true;
+			?>
+			<style>
+				.cgpt-ssr-hero{font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;padding:40px;box-sizing:border-box}
+				.cgpt-ssr-hero *{box-sizing:border-box}
+				.cgpt-ssr-hero-inner{text-align:center}
+				.cgpt-ssr-title{font-weight:400;font-size:48px;color:#1a1a1a;margin:0 0 4px;letter-spacing:-0.01em;line-height:1.2;display:inline-block;position:relative}
+				.cgpt-ssr-badge{position:absolute;top:0;right:0;transform:translate(15%,calc(-100% - 2px));background:#000;color:#fff;font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;padding:3px 8px;border-radius:4px;line-height:1;white-space:nowrap}
+				.cgpt-ssr-brand{color:#E7534F}
+				.cgpt-ssr-tagline{font-size:16px;color:#222;margin:0 0 24px;line-height:1.5}
+				.cgpt-ssr-card{background:#fff;border:1px solid #e5e7eb;border-radius:4px;box-shadow:0 20px 25px -5px rgba(0,0,0,.1),0 8px 10px -6px rgba(0,0,0,.1);padding:24px;text-align:left}
+				.cgpt-ssr-input{display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid #e5e7eb;border-radius:4px;padding:12px;margin-bottom:24px}
+				.cgpt-ssr-input-placeholder{color:#9ca3af;font-size:14px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+				.cgpt-ssr-send-btn{flex-shrink:0;width:36px;height:36px;border-radius:4px;background:#f3a6a3;color:#fff;display:flex;align-items:center;justify-content:center;font-size:16px;line-height:1}
+				.cgpt-ssr-chips{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+				.cgpt-ssr-chip{min-height:50px;border-radius:4px;background:#FDF1F1}
+				@media (min-width:640px){
+					.cgpt-ssr-card{padding:32px}
+					.cgpt-ssr-chips{gap:12px}
+				}
+				@media (max-width:639.98px){
+					.cgpt-ssr-hero{padding:24px 0 32px}
+					.cgpt-ssr-title{font-size:28px}
+					.cgpt-ssr-badge{font-size:9px;padding:2px 6px}
+					.cgpt-ssr-tagline{font-size:13px;margin-bottom:16px}
+					.cgpt-ssr-chips{grid-template-columns:1fr}
+				}
+				.cgpt-ssr-chip-text{display:flex;align-items:center;justify-content:flex-start;text-align:left;padding:10px 12px;font-size:13px;color:#1a1a1a;background:#FDF1F1}
+			</style>
+			<?php
+		}
+
+		$example_questions = ! empty( $settings['example_questions'] ) ? $settings['example_questions'] : array();
+		$tagline           = ! empty( $settings['try_asking_questions_msg'] ) ? $settings['try_asking_questions_msg'] : 'Find the insight. Frame your message. All in one place.';
+		$input_placeholder = ! empty( $settings['default_prompt'] ) ? $settings['default_prompt'] : 'Ask me about a topic, persona, or sector.';
+
+		// Consumed by the widget bundle's own WelcomeMessage fetch effect
+		// (patched to check this before hitting the network) - keyed by
+		// agent id so multiple [customgpt_chat] instances on one page
+		// with different agent_id overrides don't collide.
+		?>
+		<script nowprocket data-no-minify="1">
+		window.__cgpt_prefetched_settings = window.__cgpt_prefetched_settings || {};
+		window.__cgpt_prefetched_settings[<?php echo wp_json_encode( (string) $atts['agent_id'] ); ?>] = <?php echo wp_json_encode( $settings ? $settings : array(), JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP ); ?>;
+		</script>
+		<div class="cgpt-ssr-hero">
+			<div class="cgpt-ssr-hero-inner">
+				<h1 class="cgpt-ssr-title"><span class="cgpt-ssr-brand">ADAPT</span> Intelligence<span class="cgpt-ssr-badge">BETA</span></h1>
+				<p class="cgpt-ssr-tagline"><?php echo esc_html( $tagline ); ?></p>
+				<div class="cgpt-ssr-card">
+					<div class="cgpt-ssr-input">
+						<span class="cgpt-ssr-input-placeholder"><?php echo esc_html( $input_placeholder ); ?></span>
+						<span class="cgpt-ssr-send-btn" aria-hidden="true">&#8594;</span>
+					</div>
+					<div class="cgpt-ssr-chips">
+						<?php if ( ! empty( $example_questions ) ) : ?>
+							<?php foreach ( $example_questions as $question ) : ?>
+								<div class="cgpt-ssr-chip cgpt-ssr-chip-text"><?php echo esc_html( (string) $question ); ?></div>
+							<?php endforeach; ?>
+						<?php else : ?>
+							<div class="cgpt-ssr-chip"></div>
+							<div class="cgpt-ssr-chip"></div>
+							<div class="cgpt-ssr-chip"></div>
+						<?php endif; ?>
+					</div>
+				</div>
+			</div>
+		</div>
+		<?php
+		return ob_get_clean();
+	}
+
+	/**
+	 * Usage:
+	 *   [customgpt_chat]
+	 *   [customgpt_chat mode="floating" position="bottom-right" theme="dark"]
+	 *   [customgpt_chat mode="embedded" width="100%" height="600px"]
+	 *   [customgpt_chat agent_id="123"]   (override agent per-instance; the API key always stays server-side)
+	 */
+	public function render_shortcode( $atts ) {
+		$atts = shortcode_atts(
+			array(
+				'agent_id'   => $this->get_agent_id(),
+				'agent_name' => '',
+				'mode'       => 'embedded', // embedded | floating
+				'position'   => 'bottom-right',
+				'theme'      => 'light',
+				// Wider/shorter than a typical chat-bubble box: the hero
+				// layout (title + tagline + input + 3-column question
+				// pills) needs room to breathe horizontally, and doesn't
+				// need much height until a real conversation starts.
+				// Height defaults to "auto" so the box only takes up as
+				// much vertical space as its content needs at rest; it
+				// expands to a fixed size on its own once activated (see
+				// enqueue_active_class_behavior()).
+				//
+				// A flat "900px" here was wider than most phone screens,
+				// so on mobile the browser had to shrink the whole widget
+				// (and everything in it - text included) just to make it
+				// fit, instead of the hero content reflowing to the
+				// screen the way the rest of the page does. min() caps it
+				// at 900px on desktop (unchanged from before) but falls
+				// back to the actual viewport width minus 40px - i.e. a
+				// flush 20px on each side - on any screen narrower than
+				// that, matching the ~20px side margin the rest of the
+				// page already uses below this widget.
+				'width'      => 'min(900px, calc(100vw - 40px))',
+				'height'     => 'auto',
+			),
+			$atts,
+			'customgpt_chat'
+		);
+
+		if ( ! file_exists( $this->widget_js_path() ) ) {
+			if ( current_user_can( 'manage_options' ) ) {
+				return '<p style="border:1px solid #d63638;padding:10px;color:#d63638;">CustomGPT widget: dist/widget/customgpt-widget.b16.min.js is missing from the plugin folder. (Only visible to admins.)</p>';
+			}
+			return '';
+		}
+
+		self::$instance_count++;
+		$container_id = 'customgpt-chat-' . self::$instance_count;
+
+		$this->enqueue_widget_script();
+
+		// The widget builds request URLs as apiBaseUrl + '/projects/...'.
+		// Ending the base in "&path=" means that concatenation lands the
+		// widget's own sub-path straight into our "path" query var.
+		$proxy_base = add_query_arg(
+			array( 'action' => 'customgpt_proxy' ),
+			admin_url( 'admin-ajax.php' )
+		) . '&path=';
+
+		$config = array(
+			'agentId'    => $atts['agent_id'],
+			// The chat/conversation code path reads apiBaseUrl (string-
+			// concatenates it with endpoints directly). The agent-details
+			// code path (name, avatar, example questions) reads a
+			// DIFFERENT key, apiUrl, and silently falls back to its own
+			// hardcoded "/api/proxy" (relative to this page's own origin,
+			// which doesn't exist here) if apiUrl isn't set — even though
+			// apiBaseUrl is set correctly. Both must point at the proxy.
+			'apiBaseUrl' => $proxy_base,
+			'apiUrl'     => $proxy_base,
+			'mode'       => $atts['mode'],
+			'theme'      => $atts['theme'],
+			// The widget's own JS has internal width/height defaults
+			// (400px/600px) that it applies directly to the container at
+			// mount time, overriding whatever inline CSS we put on the
+			// wrapper div below. These must be passed into init() itself,
+			// not just set as HTML/CSS, or they're silently ignored.
+			'width'      => $atts['width'],
+			'height'     => $atts['height'],
+		);
+
+		if ( ! empty( $atts['agent_name'] ) ) {
+			$config['agentName'] = $atts['agent_name'];
+		}
+
+		ob_start();
+
+		if ( 'embedded' === $atts['mode'] ) {
+			$config['containerId'] = $container_id;
+			$prefetched_settings    = $this->fetch_agent_settings_cached( $atts['agent_id'] );
+			printf(
+				// margin:0 auto matches what the widget's own JS applies to
+				// this same element once it mounts (see render() in
+				// widget/index.tsx: Object.assign(this.container.style,
+				// {..., margin:"0 auto"})). Without it here too, the SSR
+				// placeholder sits flush left against its parent for
+				// however long the JS bundle takes to load, then visibly
+				// snaps into centered position the instant it mounts -
+				// exactly the jump reported.
+				'<div id="%1$s" class="customgpt-chat-embed" style="width:%2$s;height:%3$s;margin:0 auto;display:block;">%4$s</div>' . "\n",
+				esc_attr( $container_id ),
+				esc_attr( $atts['width'] ),
+				esc_attr( $atts['height'] ),
+				// phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- render_hero_placeholder_html() escapes every dynamic value it prints (esc_html for text, wp_json_encode for the script payload); nothing here is printed raw.
+				$this->render_hero_placeholder_html( $atts, $prefetched_settings )
+			);
+			$this->enqueue_active_class_behavior();
+		} else {
+			$config['position'] = $atts['position'];
+		}
+		?>
+		<script nowprocket data-no-minify="1">
+		( function () {
+			function initCustomGPT() {
+				if ( typeof CustomGPTWidget === 'undefined' ) {
+					setTimeout( initCustomGPT, 50 );
+					return;
+				}
+				CustomGPTWidget.init( <?php echo wp_json_encode( $config, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP ); ?> );
+			}
+			initCustomGPT();
+		} )();
+		</script>
+		<?php
+
+		return ob_get_clean();
+	}
+
+	/**
+	 * Finds every *.chunk.js file that belongs to the CURRENT build,
+	 * next to customgpt-widget.js. Webpack gives these content-hashed
+	 * names that change on every build (e.g.
+	 * 19.83a53b190e9820ed998d.chunk.js), so we can't hardcode filenames.
+	 *
+	 * Reads dist/widget/chunks-manifest.json (written by
+	 * scripts/copy-widget-assets.js during `npm run build:widget`) for
+	 * the authoritative list, falling back to a bare glob only if that
+	 * manifest is missing (e.g. a zip built before this fix existed).
+	 *
+	 * The manifest matters because if a new zip is ever extracted on top
+	 * of an older deployment without first emptying dist/widget/ (easy
+	 * to do by accident - the folder still "exists" either way), a bare
+	 * glob picks up BOTH the old build's leftover chunk files and the
+	 * new ones. Those get pushed into the same global webpack chunk
+	 * registry; since chunk IDs are small sequential integers assigned
+	 * per build, an old chunk and a new chunk can collide on the same ID
+	 * while containing completely different modules - producing the
+	 * exact "Cannot read properties of undefined (reading 'default')"
+	 * class of failure (or a silently blank widget) this plugin has hit
+	 * before, just triggered by stale leftovers instead of missing
+	 * files. The manifest sidesteps this entirely: only the files this
+	 * specific build actually produced get enqueued, regardless of what
+	 * else is sitting in the folder.
+	 */
+	private function chunk_js_paths() {
+		$dir = plugin_dir_path( __FILE__ ) . 'dist/widget/';
+		$manifest_path = $dir . 'chunks-manifest.json';
+
+		if ( file_exists( $manifest_path ) ) {
+			$manifest_json = file_get_contents( $manifest_path );
+			$manifest      = json_decode( (string) $manifest_json, true );
+
+			if ( is_array( $manifest ) && ! empty( $manifest['chunks'] ) && is_array( $manifest['chunks'] ) ) {
+				$paths = array();
+				foreach ( $manifest['chunks'] as $chunk_filename ) {
+					// Guard against path traversal / anything unexpected in
+					// a manifest that's still just a JSON file on disk.
+					$chunk_filename = basename( (string) $chunk_filename );
+					$chunk_path     = $dir . $chunk_filename;
+					if ( file_exists( $chunk_path ) ) {
+						$paths[] = $chunk_path;
+					}
+				}
+				return $paths;
+			}
+		}
+
+		// Fallback for zips built before the manifest existed.
+		$found = glob( $dir . '*.chunk.js' );
+		return $found ? $found : array();
+	}
+
+	private function enqueue_widget_script() {
+		if ( self::$script_enqueued ) {
+			return;
+		}
+		self::$script_enqueued = true;
+
+		$widget_src  = $this->widget_js_url();
+		$vendors_src = $this->vendors_js_url();
+		$css_src     = $this->widget_css_url();
+		$has_vendors = file_exists( $this->vendors_js_path() );
+		$has_css     = file_exists( $this->widget_css_path() );
+
+		$chunk_srcs = array();
+		foreach ( $this->chunk_js_paths() as $chunk_path ) {
+			$chunk_srcs[] = plugins_url( 'dist/widget/' . basename( $chunk_path ), __FILE__ );
+		}
+
+		add_action(
+			'wp_footer',
+			function () use ( $widget_src, $vendors_src, $css_src, $has_vendors, $has_css, $chunk_srcs ) {
+				if ( $has_css ) {
+					printf(
+						'<link rel="stylesheet" href="%s" />' . "\n",
+						esc_url( $css_src )
+					);
+				}
+				// vendors.js and every *.chunk.js file must load and
+				// execute BEFORE customgpt-widget.js. The widget bundle
+				// reads from them synchronously on startup rather than
+				// fetching them lazily the way webpack normally would.
+				// Skipping any of them throws "Cannot read properties of
+				// undefined (reading 'default')" partway through init —
+				// CustomGPTWidget may still get defined, but agent
+				// settings (welcome text, example questions) silently
+				// fail to load and generic fallback text is shown instead.
+				if ( $has_vendors ) {
+					printf(
+						'<script nowprocket data-no-minify="1" src="%s"></script>' . "\n",
+						esc_url( $vendors_src )
+					);
+				}
+				foreach ( $chunk_srcs as $chunk_src ) {
+					printf(
+						'<script nowprocket data-no-minify="1" src="%s"></script>' . "\n",
+						esc_url( $chunk_src )
+					);
+				}
+				printf(
+					'<script nowprocket data-no-minify="1" src="%s"></script>' . "\n",
+					esc_url( $widget_src )
+				);
+			},
+			// Runs AFTER enqueue_active_class_behavior()'s wp_footer hook
+			// (priority 1) on purpose: the click/focus listeners that expand
+			// the widget to fullscreen must be attached to the document
+			// before the browser starts downloading and executing this
+			// bundle (vendors.js + every *.chunk.js + customgpt-widget.js,
+			// several hundred KB combined), not after. Otherwise a click
+			// that lands while that bundle is still loading/parsing (very
+			// plausible - a real visitor's first click on the page often
+			// happens within the first second or two) has no listener to
+			// catch it yet, so nothing visibly happens until the bundle
+			// finishes loading and React's own onClick handler takes over -
+			// which can be several seconds later on a slow connection or
+			// a busy main thread. The generic document-level listener has
+			// no such dependency, since it only needs the container element
+			// (already present in the initial HTML) to exist, not any JS
+			// bundle to have finished loading.
+			20
+		);
+	}
+
+	/**
+	 * Wires up the "expand to fullscreen on interaction" behaviour so
+	 * this self-hosted widget matches the chat box already used
+	 * elsewhere on this site (researchstaging1.adapt.com.au homepage):
+	 * clicking or focusing anything inside the widget adds a
+	 * `cgpt-active` class to <body>; a matching CSS block below expands
+	 * the widget into a centered fixed-position overlay with a dimmed
+	 * backdrop and the same "rise" animation used there. Escape, or a
+	 * click outside the widget, collapses it back down.
+	 *
+	 * Because this widget renders straight into the page DOM (no
+	 * cross-origin iframe), a plain document-level click/focus listener
+	 * is enough — no postMessage bridge needed, unlike the iframe-based
+	 * embed on the homepage.
+	 *
+	 * Runs once per page regardless of how many [customgpt_chat]
+	 * instances it contains.
+	 */
+	private function enqueue_active_class_behavior() {
+		if ( self::$active_class_wired ) {
+			return;
+		}
+		self::$active_class_wired = true;
+
+		add_action(
+			'wp_footer',
+			function () {
+				?>
+				<style>
+					body.cgpt-active { overflow: hidden; }
+					body.cgpt-active::before {
+						content: "";
+						position: fixed;
+						inset: 0;
+						background: rgba( 0, 0, 0, .5 );
+						z-index: 999998;
+						animation: cgpt-fade .4s ease both;
+					}
+					.customgpt-chat-embed {
+						transition: none;
+					}
+					body.cgpt-active .customgpt-chat-embed {
+						position: fixed !important;
+						inset: 0;
+						margin: auto !important;
+						z-index: 999999;
+						width: min( 95%, 1200px ) !important;
+						height: min( 800px, 90vh ) !important;
+						max-height: 90vh !important;
+						animation: cgpt-rise .5s cubic-bezier( .22, 1, .36, 1 ) both;
+					}
+					/* The React widget's own root element has its own
+					   fixed 600px/400px sizing baked in; force it to fill
+					   whatever size the fullscreen overlay above is, so
+					   the chat itself actually expands too. */
+					body.cgpt-active .customgpt-chat-embed > * {
+						width: 100% !important;
+						height: 100% !important;
+					}
+					/* The host site's own theme applies a global
+					   text-transform: uppercase to form fields, which was
+					   bleeding into the hero input's placeholder ("ASK ME
+					   ABOUT A TOPIC, PERSONA, OR SECTOR."). Reset it back to
+					   normal case here and apply the requested placeholder
+					   styling, scoped to just this widget. */
+					.customgpt-chat-embed textarea {
+						text-transform: none !important;
+					}
+					.customgpt-chat-embed textarea::placeholder {
+						text-transform: none !important;
+						font-size: 14px !important;
+						font-weight: 700 !important;
+						color: #838383 !important;
+					}
+					@keyframes cgpt-rise {
+						0%   { opacity: 0; transform: translateY( 28px ) scale( .96 ); }
+						100% { opacity: 1; transform: none; }
+					}
+					@keyframes cgpt-fade {
+						0%   { opacity: 0; }
+						100% { opacity: 1; }
+					}
+					@media ( prefers-reduced-motion: reduce ) {
+						body.cgpt-active .customgpt-chat-embed,
+						body.cgpt-active::before {
+							animation: none !important;
+						}
+					}
+				</style>
+				<script nowprocket data-no-minify="1">
+				( function () {
+					// Opening the popup is handled entirely by the React
+					// app itself (ChatContainer's handleExamplePrompt and
+					// handleSendMessage both call
+					// document.body.classList.add('cgpt-active') directly),
+					// scoped to exactly two triggers: clicking an example
+					// question chip, or submitting the hero input with
+					// typed text. This script does NOT add any other
+					// "click/focus anywhere in the widget opens it"
+					// listener on top of that - only closing (reset) is
+					// handled here, plus a watchdog that guards against the
+					// popup ever closing itself outside of an explicit
+					// close action.
+					function resetAndDeactivate() {
+						var btn = document.querySelector( '.customgpt-chat-embed [aria-label="New conversation"]' );
+						if ( btn ) {
+							btn.click();
+						} else {
+							document.body.classList.remove( 'cgpt-active' );
+						}
+					}
+
+					// The widget's own "New conversation" (pencil) and
+					// "Close" (X) buttons already add/remove cgpt-active
+					// (and reset the conversation) themselves.
+					function isOwnChromeButton( target ) {
+						return !!( target.closest && (
+							target.closest( '.customgpt-chat-embed [aria-label="New conversation"]' ) ||
+							target.closest( '.customgpt-chat-embed [aria-label="Close"]' )
+						) );
+					}
+
+					// Any removal of cgpt-active must be preceded by one of
+					// these three intentional close actions (pencil/X click,
+					// click outside the widget, or Escape). The watchdog
+					// below uses this flag to tell "the user meant to close
+					// this" apart from "something else made it disappear" -
+					// e.g. a timing edge case during the send flow that
+					// otherwise made the popup look like it silently closed
+					// itself right after asking a question.
+					var resetRequested = false;
+					function markResetRequested() {
+						resetRequested = true;
+						setTimeout( function () { resetRequested = false; }, 1000 );
+					}
+
+					document.addEventListener(
+						'click',
+						function ( e ) {
+							if ( isOwnChromeButton( e.target ) ) {
+								markResetRequested();
+								return;
+							}
+							if ( ! ( e.target.closest && e.target.closest( '.customgpt-chat-embed' ) ) ) {
+								if ( document.body.classList.contains( 'cgpt-active' ) ) {
+									markResetRequested();
+									resetAndDeactivate();
+								}
+							}
+						},
+						true
+					);
+
+					document.addEventListener( 'keydown', function ( e ) {
+						if ( 'Escape' === e.key ) {
+							markResetRequested();
+							resetAndDeactivate();
+						}
+					} );
+
+					// Watchdog: once active, cgpt-active should only ever
+					// go away because of one of the intentional close
+					// actions above. If it disappears for any other reason
+					// - a stray re-render, a race in the conversation-setup
+					// flow, anything - put it straight back so the popup
+					// can never appear to close itself mid-conversation.
+					var wasActive = document.body.classList.contains( 'cgpt-active' );
+					var watchdog = new MutationObserver( function () {
+						var isActive = document.body.classList.contains( 'cgpt-active' );
+						if ( wasActive && ! isActive && ! resetRequested ) {
+							document.body.classList.add( 'cgpt-active' );
+							isActive = true;
+						}
+						wasActive = isActive;
+					} );
+					watchdog.observe( document.body, { attributes: true, attributeFilter: [ 'class' ] } );
+				} )();
+				</script>
+				<?php
+			},
+			20
+		);
+	}
+
+	/**
+	 * Server-side proxy. Forwards the widget's API calls to
+	 * app.customgpt.ai with the real API key attached, and streams the
+	 * response straight back (needed for the chat "typing" SSE stream).
+	 * The key never leaves the server.
+	 */
+	public function handle_proxy() {
+		$api_key = $this->get_api_key();
+
+		if ( empty( $api_key ) ) {
+			status_header( 500 );
+			header( 'Content-Type: application/json' );
+			echo wp_json_encode( array( 'error' => 'CustomGPT API key is not configured. Set it under Settings -> CustomGPT Chat Widget.' ) );
+			exit;
+		}
+
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- public proxy endpoint, no user state involved.
+		$path = isset( $_GET['path'] ) ? wp_unslash( $_GET['path'] ) : '';
+		$path = '/' . ltrim( (string) $path, '/' );
+
+		// The widget bundle has two internal HTTP clients. The one used
+		// for chat/conversations concatenates apiBaseUrl + endpoint
+		// directly. The one used only for agent display info (name,
+		// avatar, example questions) always prepends "/api/proxy" first
+		// (it was written for the starter-kit's own Next.js app, which
+		// has a route at that path). Strip it here so both conventions
+		// resolve to the same real CustomGPT endpoint — otherwise every
+		// agent-details fetch 404s and the widget silently falls back to
+		// generic "Agent {id}" text and default example questions.
+		if ( 0 === strpos( $path, '/api/proxy' ) ) {
+			$path = substr( $path, strlen( '/api/proxy' ) );
+			if ( '' === $path ) {
+				$path = '/';
+			}
+		}
+
+		// A literal "?" can end up inside $_GET['path'] if the widget
+		// appended its own query string; split it back out.
+		$extra_query = '';
+		if ( false !== strpos( $path, '?' ) ) {
+			list( $path, $extra_query ) = explode( '?', $path, 2 );
+		}
+
+		if ( '/' === $path || '' === trim( $path, '/' ) ) {
+			status_header( 400 );
+			header( 'Content-Type: application/json' );
+			echo wp_json_encode( array( 'error' => 'Missing proxy path.' ) );
+			exit;
+		}
+
+		$url = CUSTOMGPT_API_BASE . $path;
+		if ( $extra_query ) {
+			$url .= '?' . $extra_query;
+		}
+
+		$method   = isset( $_SERVER['REQUEST_METHOD'] ) ? strtoupper( sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) ) : 'GET';
+		$raw_body = file_get_contents( 'php://input' );
+
+		$content_type = isset( $_SERVER['CONTENT_TYPE'] ) ? sanitize_text_field( wp_unslash( $_SERVER['CONTENT_TYPE'] ) ) : 'application/json';
+
+		$headers = array(
+			'Authorization: Bearer ' . $api_key,
+			'Accept: application/json, text/event-stream',
+		);
+		if ( in_array( $method, array( 'POST', 'PUT', 'PATCH' ), true ) ) {
+			$headers[] = 'Content-Type: ' . $content_type;
+		}
+
+		/*
+		 * Disable every layer of output buffering we can reach from PHP,
+		 * so streamed chunks reach the browser as they arrive instead of
+		 * being held until the whole response is done. This is the
+		 * usual reason a "streaming" proxy silently behaves like a
+		 * regular request: PHP's own zlib/gzip output compression (which
+		 * MUST buffer the entire output before it can compress it),
+		 * leftover ob_start() buffers from other WordPress plugins, or
+		 * an in-front reverse proxy/CDN buffering by default.
+		 *
+		 * If chunks still arrive all at once after this, the buffering
+		 * is happening somewhere outside PHP entirely - most likely a
+		 * CDN (e.g. Cloudflare) or the host's own reverse proxy in front
+		 * of PHP-FPM/nginx - and needs to be disabled there for this
+		 * admin-ajax.php endpoint specifically.
+		 */
+		if ( function_exists( 'apache_setenv' ) ) {
+			@apache_setenv( 'no-gzip', '1' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		}
+		@ini_set( 'zlib.output_compression', '0' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.PHP.IniSet.Risky
+		@ini_set( 'output_buffering', 'off' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.PHP.IniSet.Risky
+		@ini_set( 'implicit_flush', '1' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.PHP.IniSet.Risky
+		if ( function_exists( 'apache_setenv' ) === false ) {
+			// Also try turning off zlib compression the non-ini_set way,
+			// in case it was enabled via php.ini with PHP_INI_SYSTEM
+			// scope (ini_set alone can't override that).
+			if ( function_exists( 'ini_get' ) && ini_get( 'zlib.output_compression' ) ) {
+				@ini_set( 'zlib.output_compression', 'Off' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.PHP.IniSet.Risky
+			}
+		}
+		while ( ob_get_level() > 0 ) {
+			@ob_end_flush(); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		}
+		set_time_limit( 0 );
+		header( 'X-Accel-Buffering: no' ); // Tell nginx (direct or via a CDN that honours it) not to buffer this response.
+		header( 'Cache-Control: no-cache, no-store, must-revalidate' );
+
+		$headers_sent = false;
+		$sse_padded   = false;
+
+		$ch = curl_init( $url );
+		curl_setopt_array(
+			$ch,
+			array(
+				CURLOPT_CUSTOMREQUEST  => $method,
+				CURLOPT_HTTPHEADER     => $headers,
+				CURLOPT_TIMEOUT        => 120,
+				CURLOPT_HEADERFUNCTION => function ( $curl_handle, $header_line ) use ( &$headers_sent, &$sse_padded ) {
+					if ( 0 === stripos( $header_line, 'HTTP/' ) && preg_match( '#HTTP/\S+\s+(\d+)#', $header_line, $m ) ) {
+						status_header( (int) $m[1] );
+					}
+
+					if ( 0 === stripos( $header_line, 'content-type:' ) ) {
+						header( trim( $header_line ) );
+						if ( false !== stripos( $header_line, 'text/event-stream' ) ) {
+							header( 'Cache-Control: no-cache' );
+							header( 'Connection: keep-alive' );
+
+							// Only now do we know for certain the upstream
+							// is actually sending SSE, so it's safe to pad:
+							// some buffering layers (proxies, occasionally
+							// browsers) hold onto the first response chunk
+							// until a minimum byte threshold is reached.
+							// An SSE comment line (leading colon) is inert
+							// to any spec-compliant client.
+							if ( ! $sse_padded ) {
+								echo ':' . str_repeat( ' ', 2048 ) . "\n\n"; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- SSE comment padding, not user data.
+								flush();
+								$sse_padded = true;
+							}
+						}
+						$headers_sent = true;
+					}
+
+					return strlen( $header_line );
+				},
+				CURLOPT_WRITEFUNCTION  => function ( $curl_handle, $chunk ) {
+					echo $chunk; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- raw upstream API passthrough (JSON / SSE).
+					flush();
+					return strlen( $chunk );
+				},
+			)
+		);
+
+		if ( in_array( $method, array( 'POST', 'PUT', 'PATCH' ), true ) && '' !== $raw_body ) {
+			curl_setopt( $ch, CURLOPT_POSTFIELDS, $raw_body );
+		}
+
+		curl_exec( $ch );
+
+		if ( curl_errno( $ch ) && ! $headers_sent ) {
+			status_header( 502 );
+			header( 'Content-Type: application/json' );
+			echo wp_json_encode(
+				array(
+					'error'   => 'Proxy request failed',
+					'details' => curl_error( $ch ),
+				)
+			);
+		}
+
+		curl_close( $ch );
+		exit;
+	}
+}
+
+new CustomGPT_Chat_Widget_Plugin();
