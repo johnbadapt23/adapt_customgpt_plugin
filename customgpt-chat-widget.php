@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.2.2
+ * Version: 2.3.0
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -132,6 +132,20 @@ final class CustomGPT_Chat_Widget_Plugin {
 	}
 
 	/**
+	 * Whether to show the "BETA" badge next to the heading. Defaults to
+	 * shown (true) so existing sites keep their current look until an
+	 * admin explicitly turns it off. Affects both the SSR placeholder's
+	 * own badge markup (.cgpt-ssr-badge, skipped entirely below when
+	 * off) and the real widget bundle's badge (.cgpt-beta-badge, which
+	 * is baked into the compiled JS - hidden via a CSS override instead
+	 * of touching that bundle) so both stay in sync and there's no
+	 * flash of the badge appearing/disappearing when React mounts.
+	 */
+	private function show_beta_badge() {
+		return '0' !== get_option( 'customgpt_widget_show_beta_badge', '1' );
+	}
+
+	/**
 	 * Prepends a "Settings" link to this plugin's row on the Plugins
 	 * list page, pointing at Settings -> CustomGPT Chat Widget.
 	 */
@@ -179,6 +193,15 @@ final class CustomGPT_Chat_Widget_Plugin {
 				'default'           => '',
 			)
 		);
+		register_setting(
+			'customgpt_chat_widget_settings',
+			'customgpt_widget_show_beta_badge',
+			array(
+				'type'              => 'string',
+				'sanitize_callback' => array( $this, 'sanitize_checkbox' ),
+				'default'           => '1',
+			)
+		);
 
 		add_settings_section( 'customgpt_chat_widget_main', '', '__return_false', 'customgpt-chat-widget' );
 
@@ -203,6 +226,23 @@ final class CustomGPT_Chat_Widget_Plugin {
 			'customgpt-chat-widget',
 			'customgpt_chat_widget_main'
 		);
+		add_settings_field(
+			'customgpt_widget_show_beta_badge',
+			'BETA Badge',
+			array( $this, 'render_show_beta_badge_field' ),
+			'customgpt-chat-widget',
+			'customgpt_chat_widget_main'
+		);
+	}
+
+	/**
+	 * Checkbox values are only present in $_POST when checked, so a
+	 * matching hidden "0" field (see render_show_beta_badge_field())
+	 * guarantees this always receives an explicit '1' or '0' rather
+	 * than sometimes being skipped entirely on save.
+	 */
+	public function sanitize_checkbox( $value ) {
+		return '1' === (string) $value ? '1' : '0';
 	}
 
 	public function render_agent_id_field() {
@@ -248,6 +288,17 @@ final class CustomGPT_Chat_Widget_Plugin {
 		} else {
 			echo '<p class="description">Only needed if the plugin\'s GitHub repo is private. A personal access token with read-only access to that repo\'s contents - leave blank for a public repo.</p>';
 		}
+	}
+
+	public function render_show_beta_badge_field() {
+		?>
+		<label>
+			<input type="hidden" name="customgpt_widget_show_beta_badge" value="0" />
+			<input type="checkbox" name="customgpt_widget_show_beta_badge" value="1" <?php checked( $this->show_beta_badge() ); ?> />
+			Show the "BETA" badge next to the widget heading
+		</label>
+		<p class="description">Unchecking this hides the badge both before and after the widget loads.</p>
+		<?php
 	}
 
 	public function render_settings_page() {
@@ -533,6 +584,13 @@ final class CustomGPT_Chat_Widget_Plugin {
 				.cgpt-ssr-chip-text{display:flex;align-items:center;justify-content:flex-start;text-align:left;padding:10px 12px;font-size:13px;color:#1a1a1a;background:#FDF1F1}
 			</style>
 			<?php
+			if ( ! $this->show_beta_badge() ) {
+				// Hides the real, post-mount widget's own badge too -
+				// that markup is baked into the compiled JS bundle
+				// (.cgpt-beta-badge), so this CSS override is the only
+				// way to turn it off without patching that bundle.
+				echo '<style>.cgpt-beta-badge{display:none!important}</style>';
+			}
 		}
 
 		$example_questions = ! empty( $settings['example_questions'] ) ? $settings['example_questions'] : array();
@@ -550,7 +608,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 		</script>
 		<div class="cgpt-ssr-hero">
 			<div class="cgpt-ssr-hero-inner">
-				<h1 class="cgpt-ssr-title"><span class="cgpt-ssr-brand">ADAPT</span> Intelligence<span class="cgpt-ssr-badge">BETA</span></h1>
+				<h1 class="cgpt-ssr-title"><span class="cgpt-ssr-brand">ADAPT</span> Intelligence<?php echo $this->show_beta_badge() ? '<span class="cgpt-ssr-badge">BETA</span>' : ''; ?></h1>
 				<p class="cgpt-ssr-tagline"><?php echo esc_html( $tagline ); ?></p>
 				<div class="cgpt-ssr-card">
 					<div class="cgpt-ssr-input">
