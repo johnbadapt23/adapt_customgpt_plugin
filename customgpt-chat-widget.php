@@ -18,14 +18,15 @@ if ( ! defined( 'ABSPATH' ) ) {
  * CustomGPT_Chat_Widget_Plugin::handle_proxy(). It is never printed
  * into a <script> tag or sent to the browser.
  *
- * This plugin's source lives in a public GitHub repo, so there is no
- * hardcoded key/agent-id here (anything in this file is publicly
- * readable). Configure both under Settings -> CustomGPT Chat Widget
- * in wp-admin (stored in this site's options table, never committed
- * to the repo). Power users can still override either one with a
- * wp-config.php constant (takes precedence over the settings page):
- *   define( 'CUSTOMGPT_WIDGET_AGENT_ID', '98865' );
- *   define( 'CUSTOMGPT_WIDGET_API_KEY', '10769|...' );
+ * This plugin's source lives in a GitHub repo, so there is no
+ * hardcoded key/agent-id here (anything in this file could end up
+ * publicly readable). Configure both under Settings -> CustomGPT Chat
+ * Widget in wp-admin (stored in this site's options table, never
+ * committed to the repo). Power users can still override either one
+ * with a wp-config.php constant (takes precedence over the settings
+ * page):
+ *   define( 'CUSTOMGPT_WIDGET_AGENT_ID', 'your-agent-id' );
+ *   define( 'CUSTOMGPT_WIDGET_API_KEY', 'your-api-key' );
  *
  * If neither source has a value, the shortcode shows an admin-only
  * notice instead of silently failing or falling back to a shared key.
@@ -38,12 +39,22 @@ if ( ! defined( 'CUSTOMGPT_API_BASE' ) ) {
  * Update checker.
  *
  * Hooks this plugin into WordPress's normal "Update available" UI on
- * the Plugins screen, sourced from git tags on the GitHub repo below
- * instead of wordpress.org. To ship a new version to every site that
- * has this installed: bump the Version header above, commit, then
- * `git tag vX.Y.Z && git push --tags`. No further action needed on
- * any individual site - each one checks the repo on its own schedule
- * (roughly every 12 hours) and shows the update like any other plugin.
+ * the Plugins screen, sourced from the GitHub repo below instead of
+ * wordpress.org. To ship a new version to every site that has this
+ * installed: bump the Version header above, commit, tag it
+ * (`git tag vX.Y.Z && git push origin vX.Y.Z`), and push the branch.
+ * No further action needed on any individual site - each one checks
+ * the repo on its own schedule (roughly every 12 hours, or instantly
+ * via "Check for updates" on the Plugins screen) and shows the update
+ * like any other plugin.
+ *
+ * Works with a private repo too: create a GitHub personal access
+ * token (classic token with the "repo" scope, or a fine-grained token
+ * with read-only "Contents" access to just this repo) and set it
+ * either under Settings -> CustomGPT Chat Widget, or as a
+ * wp-config.php constant (takes precedence over the settings page):
+ *   define( 'CUSTOMGPT_WIDGET_GITHUB_TOKEN', 'ghp_...' );
+ * Leave it blank for a public repo - it isn't required in that case.
  */
 if ( file_exists( __DIR__ . '/plugin-update-checker/plugin-update-checker.php' ) ) {
 	require_once __DIR__ . '/plugin-update-checker/plugin-update-checker.php';
@@ -53,6 +64,14 @@ if ( file_exists( __DIR__ . '/plugin-update-checker/plugin-update-checker.php' )
 		'customgpt-chat-widget'
 	);
 	$customgpt_widget_update_checker->setBranch( 'main' );
+
+	$customgpt_widget_github_token = defined( 'CUSTOMGPT_WIDGET_GITHUB_TOKEN' ) && '' !== CUSTOMGPT_WIDGET_GITHUB_TOKEN
+		? CUSTOMGPT_WIDGET_GITHUB_TOKEN
+		: get_option( 'customgpt_widget_github_token', '' );
+
+	if ( ! empty( $customgpt_widget_github_token ) ) {
+		$customgpt_widget_update_checker->setAuthentication( $customgpt_widget_github_token );
+	}
 }
 
 final class CustomGPT_Chat_Widget_Plugin {
@@ -151,6 +170,15 @@ final class CustomGPT_Chat_Widget_Plugin {
 				'default'           => '',
 			)
 		);
+		register_setting(
+			'customgpt_chat_widget_settings',
+			'customgpt_widget_github_token',
+			array(
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_text_field',
+				'default'           => '',
+			)
+		);
 
 		add_settings_section( 'customgpt_chat_widget_main', '', '__return_false', 'customgpt-chat-widget' );
 
@@ -165,6 +193,13 @@ final class CustomGPT_Chat_Widget_Plugin {
 			'customgpt_widget_api_key',
 			'API Key',
 			array( $this, 'render_api_key_field' ),
+			'customgpt-chat-widget',
+			'customgpt_chat_widget_main'
+		);
+		add_settings_field(
+			'customgpt_widget_github_token',
+			'GitHub Token',
+			array( $this, 'render_github_token_field' ),
 			'customgpt-chat-widget',
 			'customgpt_chat_widget_main'
 		);
@@ -197,6 +232,21 @@ final class CustomGPT_Chat_Widget_Plugin {
 			echo '<p class="description">Locked by a CUSTOMGPT_WIDGET_API_KEY constant in wp-config.php. Remove it there to manage this from here instead.</p>';
 		} else {
 			echo '<p class="description">Find this under API Keys in your CustomGPT dashboard. Only ever used server-side - never sent to the browser.</p>';
+		}
+	}
+
+	public function render_github_token_field() {
+		$locked = defined( 'CUSTOMGPT_WIDGET_GITHUB_TOKEN' ) && '' !== CUSTOMGPT_WIDGET_GITHUB_TOKEN;
+		$value  = $locked ? CUSTOMGPT_WIDGET_GITHUB_TOKEN : get_option( 'customgpt_widget_github_token', '' );
+		printf(
+			'<input type="password" name="customgpt_widget_github_token" value="%s" class="regular-text" autocomplete="new-password" %s />',
+			esc_attr( $value ),
+			$locked ? 'disabled' : ''
+		);
+		if ( $locked ) {
+			echo '<p class="description">Locked by a CUSTOMGPT_WIDGET_GITHUB_TOKEN constant in wp-config.php. Remove it there to manage this from here instead.</p>';
+		} else {
+			echo '<p class="description">Only needed if the plugin\'s GitHub repo is private. A personal access token with read-only access to that repo\'s contents - leave blank for a public repo.</p>';
 		}
 	}
 
