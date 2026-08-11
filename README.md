@@ -8,18 +8,32 @@ Self-hosted WordPress plugin that renders the CustomGPT.ai starter-kit chat widg
 2. Upload it as a plugin the normal way: **Plugins -> Add New -> Upload Plugin**, or drop the folder into `wp-content/plugins/`.
 3. Activate it.
 4. Go to **Settings -> CustomGPT Chat Widget** and enter your Agent ID and API key (found in your CustomGPT dashboard).
-5. Add `[customgpt_chat]` to any page or post.
+5. This repo is **private** (see below), so also enter a GitHub token in the same settings page - without one, the plugin still works fine, it just won't be able to check for updates.
+6. Add `[customgpt_chat]` to any page or post.
 
-Advanced/optional: both values can instead be pinned in `wp-config.php`, which takes precedence over the settings page:
+Advanced/optional: all three values can instead be pinned in `wp-config.php`, which takes precedence over the settings page:
 
 ```php
-define( 'CUSTOMGPT_WIDGET_AGENT_ID', '98865' );
-define( 'CUSTOMGPT_WIDGET_API_KEY', '10769|...' );
+define( 'CUSTOMGPT_WIDGET_AGENT_ID', 'your-agent-id' );
+define( 'CUSTOMGPT_WIDGET_API_KEY', 'your-api-key' );
+define( 'CUSTOMGPT_WIDGET_GITHUB_TOKEN', 'ghp_...' );
 ```
+
+## This repo is private - GitHub token required for updates
+
+This repo is private, so the update checker needs a GitHub token to be able to read it. Without one, "Check for updates" will error out instead of finding new versions.
+
+1. On GitHub: **Settings -> Developer settings -> Personal access tokens -> Fine-grained tokens -> Generate new token**.
+2. Repository access: **Only select repositories** -> this repo.
+3. Permissions: **Contents -> Read-only**. Nothing else is needed.
+4. Copy the generated token (GitHub only shows it once).
+5. On each WordPress site: **Settings -> CustomGPT Chat Widget -> GitHub Token**, paste it in, save. Or pin it in `wp-config.php` as shown above.
+
+Treat this token like a password - it's committed nowhere, only ever stored in each site's own database or its own `wp-config.php`. If a token is ever pasted somewhere it shouldn't be (chat, a screenshot, a public issue, etc.), revoke it on GitHub and generate a new one.
 
 ## Getting automatic updates on an existing site
 
-Every site with this plugin already installed checks this repo periodically (roughly every 12 hours, or on-demand via the "Check for updates" link on the Plugins screen) and will show a normal WordPress "Update available" notice when a newer version is tagged here - no manual re-upload needed after the first install.
+Every site with this plugin already installed (and a valid GitHub token configured, since the repo is private) checks this repo periodically (roughly every 12 hours, or on-demand via the "Check for updates" link on the Plugins screen) and will show a normal WordPress "Update available" notice when a newer version is tagged here - no manual re-upload needed after the first install.
 
 ## Releasing a new version
 
@@ -36,4 +50,4 @@ Sites will pick up the new version on their next automatic check (or immediately
 
 ## What's NOT in this repo
 
-The API key and Agent ID are intentionally never committed here (this repo is public). They live only in each site's own database (via the settings page) or its own `wp-config.php`.
+The API key, Agent ID, and GitHub token are intentionally never committed here, even though the repo is private now - private repos can still be made public later, added collaborators, or forked, so none of these are ever hardcoded. They live only in each site's own database (via the settings page) or its own `wp-config.php`.
