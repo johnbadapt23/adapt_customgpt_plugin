@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.3.0
+ * Version: 2.4.0
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -79,6 +79,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 	private static $instance_count               = 0;
 	private static $script_enqueued              = false;
 	private static $active_class_wired           = false;
+	private static $heading_patch_wired          = false;
 	private static $hero_placeholder_style_wired = false;
 
 	public function __construct() {
@@ -146,6 +147,25 @@ final class CustomGPT_Chat_Widget_Plugin {
 	}
 
 	/**
+	 * The colored brand word in the heading (defaults to "ADAPT",
+	 * styled in the SSR placeholder via .cgpt-ssr-brand / in the real
+	 * widget via an inline color style baked into the compiled JS).
+	 */
+	private function get_heading_brand() {
+		$value = get_option( 'customgpt_widget_heading_brand', 'ADAPT' );
+		return '' !== trim( (string) $value ) ? $value : 'ADAPT';
+	}
+
+	/**
+	 * The plain-text remainder of the heading, right after the brand
+	 * word (defaults to "Intelligence").
+	 */
+	private function get_heading_suffix() {
+		$value = get_option( 'customgpt_widget_heading_suffix', 'Intelligence' );
+		return '' !== trim( (string) $value ) ? $value : 'Intelligence';
+	}
+
+	/**
 	 * Prepends a "Settings" link to this plugin's row on the Plugins
 	 * list page, pointing at Settings -> CustomGPT Chat Widget.
 	 */
@@ -202,6 +222,24 @@ final class CustomGPT_Chat_Widget_Plugin {
 				'default'           => '1',
 			)
 		);
+		register_setting(
+			'customgpt_chat_widget_settings',
+			'customgpt_widget_heading_brand',
+			array(
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_text_field',
+				'default'           => 'ADAPT',
+			)
+		);
+		register_setting(
+			'customgpt_chat_widget_settings',
+			'customgpt_widget_heading_suffix',
+			array(
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_text_field',
+				'default'           => 'Intelligence',
+			)
+		);
 
 		add_settings_section( 'customgpt_chat_widget_main', '', '__return_false', 'customgpt-chat-widget' );
 
@@ -230,6 +268,20 @@ final class CustomGPT_Chat_Widget_Plugin {
 			'customgpt_widget_show_beta_badge',
 			'BETA Badge',
 			array( $this, 'render_show_beta_badge_field' ),
+			'customgpt-chat-widget',
+			'customgpt_chat_widget_main'
+		);
+		add_settings_field(
+			'customgpt_widget_heading_brand',
+			'Heading Brand Text',
+			array( $this, 'render_heading_brand_field' ),
+			'customgpt-chat-widget',
+			'customgpt_chat_widget_main'
+		);
+		add_settings_field(
+			'customgpt_widget_heading_suffix',
+			'Heading Suffix Text',
+			array( $this, 'render_heading_suffix_field' ),
 			'customgpt-chat-widget',
 			'customgpt_chat_widget_main'
 		);
@@ -299,6 +351,22 @@ final class CustomGPT_Chat_Widget_Plugin {
 		</label>
 		<p class="description">Unchecking this hides the badge both before and after the widget loads.</p>
 		<?php
+	}
+
+	public function render_heading_brand_field() {
+		printf(
+			'<input type="text" name="customgpt_widget_heading_brand" value="%s" class="regular-text" placeholder="ADAPT" />',
+			esc_attr( get_option( 'customgpt_widget_heading_brand', 'ADAPT' ) )
+		);
+		echo '<p class="description">The colored word at the start of the heading. Defaults to "ADAPT".</p>';
+	}
+
+	public function render_heading_suffix_field() {
+		printf(
+			'<input type="text" name="customgpt_widget_heading_suffix" value="%s" class="regular-text" placeholder="Intelligence" />',
+			esc_attr( get_option( 'customgpt_widget_heading_suffix', 'Intelligence' ) )
+		);
+		echo '<p class="description">The rest of the heading, right after the brand word. Defaults to "Intelligence". Together they read, e.g., "ADAPT Intelligence".</p>';
 	}
 
 	public function render_settings_page() {
@@ -608,7 +676,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 		</script>
 		<div class="cgpt-ssr-hero">
 			<div class="cgpt-ssr-hero-inner">
-				<h1 class="cgpt-ssr-title"><span class="cgpt-ssr-brand">ADAPT</span> Intelligence<?php echo $this->show_beta_badge() ? '<span class="cgpt-ssr-badge">BETA</span>' : ''; ?></h1>
+				<h1 class="cgpt-ssr-title"><span class="cgpt-ssr-brand"><?php echo esc_html( $this->get_heading_brand() ); ?></span> <?php echo esc_html( $this->get_heading_suffix() ); ?><?php echo $this->show_beta_badge() ? '<span class="cgpt-ssr-badge">BETA</span>' : ''; ?></h1>
 				<p class="cgpt-ssr-tagline"><?php echo esc_html( $tagline ); ?></p>
 				<div class="cgpt-ssr-card">
 					<div class="cgpt-ssr-input">
@@ -742,6 +810,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 				$this->render_hero_placeholder_html( $atts, $prefetched_settings )
 			);
 			$this->enqueue_active_class_behavior();
+			$this->enqueue_heading_patch_behavior();
 		} else {
 			$config['position'] = $atts['position'];
 		}
@@ -1065,6 +1134,105 @@ final class CustomGPT_Chat_Widget_Plugin {
 						wasActive = isActive;
 					} );
 					watchdog.observe( document.body, { attributes: true, attributeFilter: [ 'class' ] } );
+				} )();
+				</script>
+				<?php
+			},
+			20
+		);
+	}
+
+	/**
+	 * Patches the real (post-mount) widget's own heading text to match
+	 * the Heading Brand/Suffix settings. The SSR placeholder's heading
+	 * is plain PHP-rendered markup (see render_hero_placeholder_html())
+	 * so it's trivial to make dynamic there, but the real widget's
+	 * heading is baked into the compiled JS bundle as literal JSX
+	 * (unlike the BETA badge, it has no dedicated class we could target
+	 * with a CSS override) - so this patches the actual DOM text nodes
+	 * once the real <h1 class="cgpt-hero-title"> exists, and keeps
+	 * re-patching if the widget ever re-renders that heading (e.g. on
+	 * "New conversation") and would otherwise put the stock "ADAPT
+	 * Intelligence" text back.
+	 *
+	 * Only enqueued at all when the site has actually customized either
+	 * value away from the stock defaults - no extra JS for sites that
+	 * haven't touched this setting.
+	 */
+	private function enqueue_heading_patch_behavior() {
+		if ( self::$heading_patch_wired ) {
+			return;
+		}
+		if ( 'ADAPT' === $this->get_heading_brand() && 'Intelligence' === $this->get_heading_suffix() ) {
+			return;
+		}
+		self::$heading_patch_wired = true;
+
+		$brand  = $this->get_heading_brand();
+		$suffix = $this->get_heading_suffix();
+
+		add_action(
+			'wp_footer',
+			function () use ( $brand, $suffix ) {
+				?>
+				<script nowprocket data-no-minify="1">
+				( function () {
+					var CGPT_HEADING_BRAND = <?php echo wp_json_encode( $brand ); ?>;
+					var CGPT_HEADING_SUFFIX = <?php echo wp_json_encode( $suffix ); ?>;
+
+					function patchHeading( h1 ) {
+						// Expected children, in order: [0] the colored brand
+						// span, [1] a plain text node (" Intelligence"),
+						// optionally [2] the .cgpt-beta-badge span - left
+						// alone here, handled separately by the BETA Badge
+						// setting.
+						if ( ! h1 || h1.childNodes.length < 2 ) {
+							return;
+						}
+						var brandNode = h1.childNodes[0];
+						var suffixNode = h1.childNodes[1];
+						if ( brandNode && brandNode.nodeType === 1 && brandNode.textContent !== CGPT_HEADING_BRAND ) {
+							brandNode.textContent = CGPT_HEADING_BRAND;
+						}
+						var wantedSuffixText = ' ' + CGPT_HEADING_SUFFIX;
+						if ( suffixNode && suffixNode.nodeType === 3 && suffixNode.textContent !== wantedSuffixText ) {
+							suffixNode.textContent = wantedSuffixText;
+						}
+					}
+
+					function scanAndPatch( root ) {
+						if ( ! root || ! root.querySelectorAll ) {
+							return;
+						}
+						var headings = root.querySelectorAll( 'h1.cgpt-hero-title' );
+						for ( var i = 0; i < headings.length; i++ ) {
+							patchHeading( headings[ i ] );
+						}
+					}
+
+					scanAndPatch( document );
+
+					var headingObserver = new MutationObserver( function ( mutations ) {
+						for ( var i = 0; i < mutations.length; i++ ) {
+							var m = mutations[ i ];
+							if ( m.target && m.target.nodeType === 1 && m.target.matches && m.target.matches( 'h1.cgpt-hero-title' ) ) {
+								patchHeading( m.target );
+							}
+							if ( m.addedNodes ) {
+								for ( var j = 0; j < m.addedNodes.length; j++ ) {
+									var node = m.addedNodes[ j ];
+									if ( node.nodeType !== 1 ) {
+										continue;
+									}
+									if ( node.matches && node.matches( 'h1.cgpt-hero-title' ) ) {
+										patchHeading( node );
+									}
+									scanAndPatch( node );
+								}
+							}
+						}
+					} );
+					headingObserver.observe( document.body, { childList: true, subtree: true, characterData: true } );
 				} )();
 				</script>
 				<?php
