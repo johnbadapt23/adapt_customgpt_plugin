@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.4.0
+ * Version: 2.4.1
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -257,13 +257,18 @@ final class CustomGPT_Chat_Widget_Plugin {
 			'customgpt-chat-widget',
 			'customgpt_chat_widget_main'
 		);
-		add_settings_field(
-			'customgpt_widget_github_token',
-			'GitHub Token',
-			array( $this, 'render_github_token_field' ),
-			'customgpt-chat-widget',
-			'customgpt_chat_widget_main'
-		);
+		// Hidden from the settings page while this repo is public (not
+		// needed - see README). The underlying option, wp-config.php
+		// constant, and update-checker logic are all still fully intact
+		// above; uncomment this block to bring the field back if the
+		// repo ever goes private again.
+		// add_settings_field(
+		// 	'customgpt_widget_github_token',
+		// 	'GitHub Token',
+		// 	array( $this, 'render_github_token_field' ),
+		// 	'customgpt-chat-widget',
+		// 	'customgpt_chat_widget_main'
+		// );
 		add_settings_field(
 			'customgpt_widget_show_beta_badge',
 			'BETA Badge',
