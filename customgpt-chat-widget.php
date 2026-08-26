@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.5.1
+ * Version: 2.6.0
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1247,16 +1247,21 @@ final class CustomGPT_Chat_Widget_Plugin {
 	}
 
 	/**
-	 * Best-effort lookup of a media library attachment whose stored
-	 * filename ends with the given citation title (e.g.
-	 * "CIO-Persona-Profile-v.2.pdf" as shown in the citations list).
-	 * Matches against the _wp_attached_file postmeta (the actual
-	 * on-disk filename, e.g. "2026/08/CIO-Persona-Profile-v.2.pdf")
-	 * rather than the post title, since WordPress sanitizes/spaces-to-
-	 * dashes post titles on upload but keeps the real filename intact.
+	 * Best-effort lookup of a media library attachment matching the
+	 * given citation title (e.g. "CIO-Persona-Profile-v.2.pdf" as shown
+	 * in the citations list). Tries the exact filename first; if
+	 * that's not found, retries the same base name against a few
+	 * common office-document extensions before giving up - CustomGPT
+	 * citations are sometimes a PDF exported specifically for upload
+	 * there, while the file actually living in this site's media
+	 * library is still the original source format it was converted
+	 * from (e.g. the source PPTX). Every individual attempt is still an
+	 * exact filename match, never fuzzy - this only widens which exact
+	 * filename gets tried, not how loosely each one matches.
+	 *
 	 * Returns null - leaving the citation's original CustomGPT url
-	 * untouched - if nothing matches or the title doesn't look like a
-	 * real filename.
+	 * untouched - if nothing matches at all, or the title doesn't look
+	 * like a real filename.
 	 */
 	private function find_local_media_url_by_filename( $filename ) {
 		$filename = trim( (string) $filename );
@@ -1264,24 +1269,55 @@ final class CustomGPT_Chat_Widget_Plugin {
 			return null;
 		}
 
+		$url = $this->find_attachment_url_by_exact_filename( $filename );
+		if ( $url ) {
+			return $url;
+		}
+
+		$dot          = strrpos( $filename, '.' );
+		$base_name    = substr( $filename, 0, $dot );
+		$original_ext = strtolower( substr( $filename, $dot + 1 ) );
+
+		foreach ( array( 'pdf', 'pptx', 'ppt', 'docx', 'doc' ) as $fallback_ext ) {
+			if ( $fallback_ext === $original_ext ) {
+				continue; // Already tried above.
+			}
+			$url = $this->find_attachment_url_by_exact_filename( $base_name . '.' . $fallback_ext );
+			if ( $url ) {
+				return $url;
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * Exact-filename half of find_local_media_url_by_filename() above -
+	 * matches the _wp_attached_file postmeta (the real on-disk
+	 * filename, e.g. "2026/08/CIO-Persona-Profile-v.2.pdf") rather than
+	 * the post title, since WordPress sanitizes/spaces-to-dashes post
+	 * titles on upload but keeps the real filename intact.
+	 *
+	 * Matches only on a real path boundary - either the whole stored
+	 * value (a file uploaded with no year/month subfolder) or right
+	 * after a "/" (e.g. "2026/08/<filename>") - not just any suffix. A
+	 * plain "%filename" LIKE would also match an unrelated, longer
+	 * filename that merely happens to end with this one (e.g.
+	 * "XYZ-CIO-Persona-Profile-v.2.pdf").
+	 *
+	 * If more than one attachment still matches (the same filename
+	 * genuinely uploaded more than once, e.g. into different month
+	 * folders), the most recently uploaded one wins - WordPress already
+	 * renames on collision instead of silently overwriting, so two
+	 * distinct attachments sharing an exact filename are either an
+	 * intentional re-upload/replacement (newest is correct) or a
+	 * coincidence (arbitrary either way, and newest is the least
+	 * surprising default).
+	 */
+	private function find_attachment_url_by_exact_filename( $filename ) {
 		global $wpdb;
 
-		// Matches only on a real path boundary - either the whole
-		// stored value (a file uploaded with no year/month subfolder)
-		// or right after a "/" (e.g. "2026/08/<filename>") - not just
-		// any suffix. A plain "%filename" LIKE would also match an
-		// unrelated, longer filename that merely happens to end with
-		// this one (e.g. "XYZ-CIO-Persona-Profile-v.2.pdf").
-		//
-		// If more than one attachment still matches (the same filename
-		// genuinely uploaded more than once, e.g. into different month
-		// folders), the most recently uploaded one wins - WordPress
-		// already renames on collision instead of silently overwriting,
-		// so two distinct attachments sharing an exact filename are
-		// either an intentional re-upload/replacement (newest is
-		// correct) or a coincidence (arbitrary either way, and newest
-		// is the least surprising default).
-		$escaped = $wpdb->esc_like( $filename );
+		$escaped       = $wpdb->esc_like( $filename );
 		$attachment_id = $wpdb->get_var(
 			$wpdb->prepare(
 				"SELECT post_id FROM {$wpdb->postmeta}
