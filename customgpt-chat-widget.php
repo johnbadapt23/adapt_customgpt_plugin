@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.8.3
+ * Version: 2.9.0
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -577,7 +577,24 @@ final class CustomGPT_Chat_Widget_Plugin {
 			return null;
 		}
 
-		$body = json_decode( wp_remote_retrieve_body( $response ), true );
+		$raw_body = wp_remote_retrieve_body( $response );
+
+		// The widget bundle hits this exact same GET /projects/{id}/settings
+		// endpoint a SECOND time on its own, via the generic proxy
+		// (handle_proxy() -> proxy_settings_request()), for its chat-
+		// initialization flow - a separate code path from the hero-display
+		// prefetch this function exists for, needing the full raw response
+		// rather than just the 3 fields cached below. Since this function
+		// already runs on every page load (well before any visitor could
+		// possibly click fast enough to beat it), priming that other
+		// cache here means the widget's own settings fetch is very likely
+		// already warm by the time anyone clicks - turning what would be
+		// another ~1+ second round trip (on top of WordPress's own
+		// admin-ajax bootstrap cost) into a near-instant cache hit,
+		// without needing to touch the compiled bundle at all.
+		set_transient( 'customgpt_widget_raw_settings_' . $agent_id, array( 'body' => $raw_body ), 5 * MINUTE_IN_SECONDS );
+
+		$body = json_decode( $raw_body, true );
 		$data = isset( $body['data'] ) && is_array( $body['data'] ) ? $body['data'] : $body;
 
 		if ( ! is_array( $data ) ) {
@@ -1584,6 +1601,63 @@ final class CustomGPT_Chat_Widget_Plugin {
 	}
 
 	/**
+	 * Serves GET /projects/{id}/settings from a short-lived transient
+	 * cache when one exists, instead of always round-tripping to
+	 * CustomGPT's API. This is the same cache fetch_agent_settings_cached()
+	 * already warms on every page load (for the SSR hero placeholder) -
+	 * this method is what lets the widget bundle's OWN separate settings
+	 * fetch (part of its chat-initialization flow, not the hero display)
+	 * benefit from that same warm cache instead of always paying its own
+	 * full round trip on top of WordPress's admin-ajax bootstrap cost.
+	 * Falls back to a live, uncached fetch/passthrough exactly like
+	 * before whenever the cache is empty or expired.
+	 */
+	private function proxy_settings_request( $url, $api_key, $project_id ) {
+		$cache_key = 'customgpt_widget_raw_settings_' . $project_id;
+		$cached    = get_transient( $cache_key );
+		if ( is_array( $cached ) && isset( $cached['body'] ) ) {
+			status_header( 200 );
+			header( 'Content-Type: application/json' );
+			echo $cached['body']; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- raw upstream API response, cached verbatim from a prior passthrough.
+			return;
+		}
+
+		$response = wp_remote_get(
+			$url,
+			array(
+				'headers' => array(
+					'Authorization' => 'Bearer ' . $api_key,
+					'Accept'        => 'application/json',
+				),
+				'timeout' => 15,
+			)
+		);
+
+		if ( is_wp_error( $response ) ) {
+			status_header( 502 );
+			header( 'Content-Type: application/json' );
+			echo wp_json_encode(
+				array(
+					'error'   => 'Proxy request failed',
+					'details' => $response->get_error_message(),
+				)
+			);
+			return;
+		}
+
+		$code      = (int) wp_remote_retrieve_response_code( $response );
+		$body_text = wp_remote_retrieve_body( $response );
+
+		if ( 200 === $code && '' !== $body_text ) {
+			set_transient( $cache_key, array( 'body' => $body_text ), 5 * MINUTE_IN_SECONDS );
+		}
+
+		status_header( $code );
+		header( 'Content-Type: application/json' );
+		echo $body_text; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- raw upstream API passthrough.
+	}
+
+	/**
 	 * Server-side proxy. Forwards the widget's API calls to
 	 * app.customgpt.ai with the real API key attached, and streams the
 	 * response straight back (needed for the chat "typing" SSE stream).
@@ -1652,6 +1726,25 @@ final class CustomGPT_Chat_Widget_Plugin {
 			&& 'GET' === strtoupper( sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) )
 		) {
 			$this->proxy_citation_request( $url, $api_key );
+			exit;
+		}
+
+		// GET /projects/{id}/settings is fetched by the widget bundle's
+		// own chat-initialization code path (separate from the SSR hero
+		// prefetch in fetch_agent_settings_cached(), which now also warms
+		// this same cache - see the comment there). Settings data changes
+		// rarely, so serving it from a short-lived cache when possible
+		// avoids paying a real CustomGPT API round trip on top of
+		// WordPress's own admin-ajax bootstrap cost, every single time.
+		// Only intercepts this one specific, non-streaming GET endpoint;
+		// everything else (in particular the streaming chat endpoint
+		// below) is completely untouched.
+		if (
+			preg_match( '#^/projects/(\d+)/settings$#', $path, $settings_match )
+			&& isset( $_SERVER['REQUEST_METHOD'] )
+			&& 'GET' === strtoupper( sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) )
+		) {
+			$this->proxy_settings_request( $url, $api_key, (int) $settings_match[1] );
 			exit;
 		}
 
