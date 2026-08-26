@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.9.3
+ * Version: 2.10.0
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1203,15 +1203,50 @@ final class CustomGPT_Chat_Widget_Plugin {
 						setTimeout( function () { resetRequested = false; }, 1000 );
 					}
 
+					// Response-in-flight tracking, used below to block
+					// closing the widget (via the X button, clicking
+					// outside it, or Escape) while an answer is still being
+					// generated or typed out - otherwise the widget's own
+					// close/reset handler discards it outright. The
+					// compiled bundle disables its own textarea for the
+					// entire request lifecycle (both the initial "thinking"
+					// wait and the token-by-token streaming afterwards),
+					// driven by a single internal boolean - see dist/widget/
+					// - so the textarea's disabled attribute is used here
+					// as a reliable, DOM-only, external proxy for that
+					// state without needing access to the bundle's own
+					// React internals.
+					var responseInFlight = false;
+					function updateResponseInFlight() {
+						var textarea = document.querySelector( '.customgpt-chat-embed textarea' );
+						responseInFlight = !! ( textarea && textarea.disabled );
+					}
+					updateResponseInFlight();
+					new MutationObserver( updateResponseInFlight ).observe( document.body, {
+						attributes: true,
+						attributeFilter: [ 'disabled' ],
+						subtree: true,
+					} );
+
 					document.addEventListener(
 						'click',
 						function ( e ) {
 							if ( isOwnChromeButton( e.target ) ) {
+								if ( responseInFlight && e.target.closest( '.customgpt-chat-embed [aria-label="Close"]' ) ) {
+									// Block the click from ever reaching the
+									// widget's own close handler.
+									e.preventDefault();
+									e.stopPropagation();
+									return;
+								}
 								markResetRequested();
 								return;
 							}
 							if ( ! ( e.target.closest && e.target.closest( '.customgpt-chat-embed' ) ) ) {
 								if ( document.body.classList.contains( 'cgpt-active' ) ) {
+									if ( responseInFlight ) {
+										return;
+									}
 									markResetRequested();
 									resetAndDeactivate();
 								}
@@ -1222,6 +1257,9 @@ final class CustomGPT_Chat_Widget_Plugin {
 
 					document.addEventListener( 'keydown', function ( e ) {
 						if ( 'Escape' === e.key ) {
+							if ( responseInFlight ) {
+								return;
+							}
 							markResetRequested();
 							resetAndDeactivate();
 						}
