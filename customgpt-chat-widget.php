@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.10.0
+ * Version: 2.10.1
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1207,24 +1207,31 @@ final class CustomGPT_Chat_Widget_Plugin {
 					// closing the widget (via the X button, clicking
 					// outside it, or Escape) while an answer is still being
 					// generated or typed out - otherwise the widget's own
-					// close/reset handler discards it outright. The
-					// compiled bundle disables its own textarea for the
-					// entire request lifecycle (both the initial "thinking"
-					// wait and the token-by-token streaming afterwards),
-					// driven by a single internal boolean - see dist/widget/
-					// - so the textarea's disabled attribute is used here
-					// as a reliable, DOM-only, external proxy for that
-					// state without needing access to the bundle's own
-					// React internals.
+					// close/reset handler discards it outright. Two
+					// separate signals feed this, covering two separate
+					// windows: the compiled bundle disables its own
+					// textarea for its entire request lifecycle (thinking
+					// + streaming, driven by a single internal boolean -
+					// see dist/widget/), which covers everything from the
+					// moment a conversation already exists onward; but the
+					// EARLIER window - conversation creation, before the
+					// chat view has even mounted - has no such signal from
+					// the bundle, since the textarea doesn't reflect that
+					// state at all. showHeroTransitionOverlay()'s own
+					// overlay element is up for exactly that earlier
+					// window, so its presence is used as the second
+					// signal.
 					var responseInFlight = false;
 					function updateResponseInFlight() {
 						var textarea = document.querySelector( '.customgpt-chat-embed textarea' );
-						responseInFlight = !! ( textarea && textarea.disabled );
+						var transitioning = !! document.getElementById( 'cgpt-transition-overlay' );
+						responseInFlight = transitioning || !! ( textarea && textarea.disabled );
 					}
 					updateResponseInFlight();
 					new MutationObserver( updateResponseInFlight ).observe( document.body, {
 						attributes: true,
 						attributeFilter: [ 'disabled' ],
+						childList: true,
 						subtree: true,
 					} );
 
@@ -1309,8 +1316,19 @@ final class CustomGPT_Chat_Widget_Plugin {
 							}
 						}
 
+						// Only "the hero markup is actually gone" counts as
+						// done - checking for a .cgpt-msg-row appearing
+						// ANYWHERE in the document was too broad (e.g. a
+						// stray/leftover row from an earlier conversation
+						// elsewhere in the DOM could satisfy it), causing
+						// the overlay to disappear before the real chat
+						// view had actually replaced the hero - which both
+						// re-exposed the frozen hero underneath for a few
+						// more seconds AND, since responseInFlight below
+						// also depends on this overlay's lifetime, made the
+						// close-while-loading guard stop working too early.
 						var observer = new MutationObserver( function () {
-							if ( ! document.querySelector( '.cgpt-hero-wrap' ) || document.querySelector( '.cgpt-msg-row' ) ) {
+							if ( ! document.querySelector( '.cgpt-hero-wrap' ) ) {
 								remove();
 							}
 						} );
