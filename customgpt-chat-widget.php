@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.10.2
+ * Version: 2.11.0
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -73,6 +73,73 @@ if ( file_exists( __DIR__ . '/plugin-update-checker/plugin-update-checker.php' )
 		$customgpt_widget_update_checker->setAuthentication( $customgpt_widget_github_token );
 	}
 }
+
+/*
+ * Fast proxy accelerator install/sync.
+ *
+ * includes/customgpt-fast-proxy.php (see that file for the full
+ * explanation) needs to run at WordPress's "must-use plugins" bootstrap
+ * stage to have any effect - a regular plugin, including this one,
+ * loads far too late to intercept anything before the ~1.4s of other
+ * plugin/theme loading it exists to skip. WordPress only auto-loads
+ * files placed directly in wp-content/mu-plugins/ (no subfolders, no
+ * activation mechanism of its own), so this plugin copies its own
+ * fast-proxy file there itself.
+ */
+function customgpt_widget_fast_proxy_source_path() {
+	return __DIR__ . '/includes/customgpt-fast-proxy.php';
+}
+
+function customgpt_widget_fast_proxy_target_path() {
+	return WPMU_PLUGIN_DIR . '/customgpt-fast-proxy.php';
+}
+
+function customgpt_widget_install_fast_proxy() {
+	$source = customgpt_widget_fast_proxy_source_path();
+	if ( ! file_exists( $source ) ) {
+		return;
+	}
+	if ( ! function_exists( 'wp_mkdir_p' ) ) {
+		require_once ABSPATH . 'wp-admin/includes/file.php';
+	}
+	wp_mkdir_p( WPMU_PLUGIN_DIR );
+	copy( $source, customgpt_widget_fast_proxy_target_path() );
+}
+
+function customgpt_widget_remove_fast_proxy() {
+	$target = customgpt_widget_fast_proxy_target_path();
+	if ( file_exists( $target ) ) {
+		wp_delete_file( $target );
+	}
+}
+
+register_activation_hook( __FILE__, 'customgpt_widget_install_fast_proxy' );
+register_deactivation_hook( __FILE__, 'customgpt_widget_remove_fast_proxy' );
+
+/*
+ * Activation hooks only fire on an actual (de)activate click, never on a
+ * version update pulled in via the update checker above - without this,
+ * an already-installed copy in mu-plugins/ would keep running whatever
+ * (possibly outdated, possibly buggy) logic it had at the moment it was
+ * first installed, indefinitely, until someone happened to deactivate
+ * and reactivate the plugin. Re-syncing whenever the source file is
+ * newer than the installed copy (checked on admin_init - cheap, and
+ * every admin-ajax.php request naturally triggers it as part of its own
+ * normal bootstrap too, on any request the fast path itself doesn't
+ * intercept) keeps the installed copy current automatically after every
+ * update.
+ */
+function customgpt_widget_maybe_sync_fast_proxy() {
+	$source = customgpt_widget_fast_proxy_source_path();
+	if ( ! file_exists( $source ) ) {
+		return;
+	}
+	$target = customgpt_widget_fast_proxy_target_path();
+	if ( ! file_exists( $target ) || filemtime( $source ) > filemtime( $target ) ) {
+		customgpt_widget_install_fast_proxy();
+	}
+}
+add_action( 'admin_init', 'customgpt_widget_maybe_sync_fast_proxy' );
 
 final class CustomGPT_Chat_Widget_Plugin {
 
@@ -240,6 +307,15 @@ final class CustomGPT_Chat_Widget_Plugin {
 				'default'           => 'Intelligence',
 			)
 		);
+		register_setting(
+			'customgpt_chat_widget_settings',
+			'customgpt_widget_fast_proxy_enabled',
+			array(
+				'type'              => 'string',
+				'sanitize_callback' => array( $this, 'sanitize_checkbox' ),
+				'default'           => '1',
+			)
+		);
 
 		add_settings_section( 'customgpt_chat_widget_main', '', '__return_false', 'customgpt-chat-widget' );
 
@@ -287,6 +363,13 @@ final class CustomGPT_Chat_Widget_Plugin {
 			'customgpt_widget_heading_suffix',
 			'Heading Suffix Text',
 			array( $this, 'render_heading_suffix_field' ),
+			'customgpt-chat-widget',
+			'customgpt_chat_widget_main'
+		);
+		add_settings_field(
+			'customgpt_widget_fast_proxy_enabled',
+			'Fast Proxy (experimental)',
+			array( $this, 'render_fast_proxy_enabled_field' ),
 			'customgpt-chat-widget',
 			'customgpt_chat_widget_main'
 		);
@@ -345,6 +428,26 @@ final class CustomGPT_Chat_Widget_Plugin {
 		} else {
 			echo '<p class="description">Only needed if the plugin\'s GitHub repo is private. A personal access token with read-only access to that repo\'s contents - leave blank for a public repo.</p>';
 		}
+	}
+
+	public function render_fast_proxy_enabled_field() {
+		$installed = file_exists( customgpt_widget_fast_proxy_target_path() );
+		?>
+		<label>
+			<input type="hidden" name="customgpt_widget_fast_proxy_enabled" value="0" />
+			<input type="checkbox" name="customgpt_widget_fast_proxy_enabled" value="1" <?php checked( '0' !== get_option( 'customgpt_widget_fast_proxy_enabled', '1' ) ); ?> />
+			Speed up sending messages by bypassing WordPress's normal plugin/theme loading for just those two requests
+		</label>
+		<p class="description">
+			Skips roughly a second of WordPress's own overhead on every message sent through the chat (measured live on this site), by handling just the "create conversation" and "send message" requests from a file that runs before other plugins load, instead of the normal admin-ajax.php path. Everything else (settings, citations, all other functionality) is completely unaffected either way.
+			<?php if ( $installed ) : ?>
+				Currently <strong>installed</strong> at <code>wp-content/mu-plugins/customgpt-fast-proxy.php</code>.
+			<?php else : ?>
+				Not currently installed - deactivating and reactivating this plugin (or an update, since this reinstalls itself automatically) will install it.
+			<?php endif; ?>
+			Uncheck this at any time to fall back to the normal path with zero other changes - safe to toggle freely.
+		</p>
+		<?php
 	}
 
 	public function render_show_beta_badge_field() {

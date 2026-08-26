@@ -38,6 +38,14 @@ Every site with this plugin already installed checks this repo periodically (rou
 
 Sites will pick up the new version on their next automatic check (or immediately if an admin clicks "Check for updates" on the Plugins screen).
 
+## Fast Proxy accelerator (experimental)
+
+`includes/customgpt-fast-proxy.php` is copied automatically into `wp-content/mu-plugins/customgpt-fast-proxy.php` on activation (and re-synced automatically after every update). It intercepts just the "create conversation" and "send message" proxy requests at WordPress's earliest possible bootstrap stage, before every other active plugin and the theme load - skipping roughly a second of overhead per message, measured live. Every other request (settings, citations, anything unrecognised) is completely untouched and falls straight through to the normal `admin-ajax.php` path, which remains the single source of truth for correctness.
+
+Toggle it off any time under **Settings -> CustomGPT Chat Widget -> Fast Proxy** with zero other side effects - it's purely an optional accelerator layered on top of the normal proxy, never a replacement for it. Responses that went through it carry an `X-CGPT-Fast-Proxy: 1` header, visible in the browser's Network tab, for confirming it's actually engaging.
+
+If this file is ever deleted from `wp-content/mu-plugins/` (e.g. manually, or by a migration tool that doesn't preserve mu-plugins), it reinstalls itself automatically the next time any `wp-admin` page loads - no manual step needed. Deactivating the plugin removes it.
+
 ## What's NOT in this repo
 
 The API key and Agent ID are intentionally never committed here - this repo is public, so anything here is visible to anyone. They live only in each site's own database (via the settings page) or its own `wp-config.php`.
