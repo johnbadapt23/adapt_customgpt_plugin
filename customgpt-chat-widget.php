@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.7.1
+ * Version: 2.8.0
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -655,6 +655,33 @@ final class CustomGPT_Chat_Widget_Plugin {
 					.cgpt-ssr-chips{grid-template-columns:1fr}
 				}
 				.cgpt-ssr-chip-text{display:flex;align-items:center;justify-content:flex-start;text-align:left;padding:10px 12px;font-size:13px;color:#1a1a1a;background:#FDF1F1}
+				/* First-interaction loading affordance: the placeholder's
+				   chips/input have no handler of their own until the real
+				   widget bundle mounts and replaces this markup outright
+				   (see enqueue_active_class_behavior()'s click listener,
+				   which adds this class on click). Without this, a click
+				   that lands before the bundle finishes loading looks like
+				   nothing happened at all for however long that takes. */
+				.cgpt-ssr-card{position:relative}
+				.cgpt-ssr-hero.cgpt-ssr-loading .cgpt-ssr-input,
+				.cgpt-ssr-hero.cgpt-ssr-loading .cgpt-ssr-chips{opacity:.45;pointer-events:none}
+				.cgpt-ssr-hero.cgpt-ssr-loading .cgpt-ssr-card::after{
+					content:"";
+					position:absolute;
+					top:50%;
+					left:50%;
+					width:28px;
+					height:28px;
+					margin:-14px 0 0 -14px;
+					border:3px solid #e5e7eb;
+					border-top-color:#E7534F;
+					border-radius:50%;
+					animation:cgpt-ssr-spin .7s linear infinite;
+				}
+				@keyframes cgpt-ssr-spin{to{transform:rotate(360deg)}}
+				@media (prefers-reduced-motion: reduce){
+					.cgpt-ssr-hero.cgpt-ssr-loading .cgpt-ssr-card::after{animation:none}
+				}
 			</style>
 			<?php
 			if ( ! $this->show_beta_badge() ) {
@@ -1132,6 +1159,38 @@ final class CustomGPT_Chat_Widget_Plugin {
 							resetAndDeactivate();
 						}
 					} );
+
+					// SSR-placeholder loading affordance (see the matching
+					// CSS in render_hero_placeholder_html()). The
+					// placeholder's chips/input are plain markup with no
+					// handler of their own until the real widget bundle
+					// finishes loading and replaces this container's
+					// contents outright - if a visitor's first click on the
+					// page lands on one of them before that swap happens,
+					// this gives instant visual feedback (spinner, disabled
+					// state) instead of leaving them looking at an
+					// unresponsive placeholder for however long the bundle
+					// takes to load and mount. Capture phase, and never
+					// calls preventDefault/stopPropagation, so it can never
+					// block whatever the widget bundle's own handlers do
+					// with the same click once they're attached; once React
+					// mounts it removes this markup entirely, so this
+					// listener simply stops matching anything on later
+					// clicks.
+					document.addEventListener(
+						'click',
+						function ( e ) {
+							var target = e.target.closest && e.target.closest( '.cgpt-ssr-chip, .cgpt-ssr-input' );
+							if ( ! target ) {
+								return;
+							}
+							var hero = target.closest( '.cgpt-ssr-hero' );
+							if ( hero ) {
+								hero.classList.add( 'cgpt-ssr-loading' );
+							}
+						},
+						true
+					);
 
 					// Watchdog: once active, cgpt-active should only ever
 					// go away because of one of the intentional close
