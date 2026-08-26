@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.10.1
+ * Version: 2.10.2
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1316,19 +1316,25 @@ final class CustomGPT_Chat_Widget_Plugin {
 							}
 						}
 
-						// Only "the hero markup is actually gone" counts as
-						// done - checking for a .cgpt-msg-row appearing
-						// ANYWHERE in the document was too broad (e.g. a
-						// stray/leftover row from an earlier conversation
-						// elsewhere in the DOM could satisfy it), causing
-						// the overlay to disappear before the real chat
-						// view had actually replaced the hero - which both
-						// re-exposed the frozen hero underneath for a few
-						// more seconds AND, since responseInFlight below
-						// also depends on this overlay's lifetime, made the
-						// close-while-loading guard stop working too early.
+						// Confirmed live via instrumented timing trace: the
+						// bundle briefly UNMOUNTS AND REMOUNTS the hero
+						// screen mid-transition (e.g. heroWrap gone at
+						// +7524ms, back again at +7617ms, gone for good
+						// only at +8381ms when the first real message row
+						// finally appears) - a transient re-render inside
+						// the compiled bundle itself, not something this
+						// plugin controls. Keying removal off "hero is
+						// gone" (as an earlier version of this did) fires
+						// on that first flicker and re-exposes the
+						// momentarily-remounted hero underneath. A
+						// .cgpt-msg-row appearing is the one signal that
+						// held stable in that trace - it only ever flips
+						// true once, exactly when the transition is
+						// actually, finally done. Scoped to this widget's
+						// own container in case multiple [customgpt_chat]
+						// instances exist on one page.
 						var observer = new MutationObserver( function () {
-							if ( ! document.querySelector( '.cgpt-hero-wrap' ) ) {
+							if ( document.querySelector( '.customgpt-chat-embed .cgpt-msg-row' ) ) {
 								remove();
 							}
 						} );
