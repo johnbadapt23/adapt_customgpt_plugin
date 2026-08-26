@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.8.2
+ * Version: 2.8.3
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1754,6 +1754,21 @@ final class CustomGPT_Chat_Widget_Plugin {
 
 		if ( in_array( $method, array( 'POST', 'PUT', 'PATCH' ), true ) && '' !== $raw_body ) {
 			curl_setopt( $ch, CURLOPT_POSTFIELDS, $raw_body );
+		}
+
+		// Diagnostic only: splits "how long did WordPress itself take to
+		// get here" from "how long did the upstream CustomGPT API take" -
+		// the two very different possible explanations for a slow proxy
+		// call. REQUEST_TIME_FLOAT is set by PHP at the very start of the
+		// request, before admin-ajax.php has loaded WordPress core, every
+		// active plugin, and the theme - all of which run before this
+		// function is ever called - so this header captures that entire
+		// cost, not just time spent inside this method. Cheap enough
+		// (one subtraction) to leave in permanently rather than gate
+		// behind a flag; safe to remove once the current investigation is
+		// done if it's no longer useful.
+		if ( isset( $_SERVER['REQUEST_TIME_FLOAT'] ) ) {
+			header( 'X-CGPT-Bootstrap-Ms: ' . round( ( microtime( true ) - (float) $_SERVER['REQUEST_TIME_FLOAT'] ) * 1000 ) );
 		}
 
 		curl_exec( $ch );
