@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.4.1
+ * Version: 2.5.0
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1247,6 +1247,94 @@ final class CustomGPT_Chat_Widget_Plugin {
 	}
 
 	/**
+	 * Best-effort lookup of a media library attachment whose stored
+	 * filename ends with the given citation title (e.g.
+	 * "CIO-Persona-Profile-v.2.pdf" as shown in the citations list).
+	 * Matches against the _wp_attached_file postmeta (the actual
+	 * on-disk filename, e.g. "2026/08/CIO-Persona-Profile-v.2.pdf")
+	 * rather than the post title, since WordPress sanitizes/spaces-to-
+	 * dashes post titles on upload but keeps the real filename intact.
+	 * Returns null - leaving the citation's original CustomGPT url
+	 * untouched - if nothing matches or the title doesn't look like a
+	 * real filename.
+	 */
+	private function find_local_media_url_by_filename( $filename ) {
+		$filename = trim( (string) $filename );
+		if ( '' === $filename || false === strpos( $filename, '.' ) ) {
+			return null;
+		}
+
+		global $wpdb;
+		$attachment_id = $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '_wp_attached_file' AND meta_value LIKE %s ORDER BY post_id DESC LIMIT 1",
+				'%' . $wpdb->esc_like( $filename )
+			)
+		);
+
+		if ( empty( $attachment_id ) ) {
+			return null;
+		}
+
+		$url = wp_get_attachment_url( (int) $attachment_id );
+		return $url ? $url : null;
+	}
+
+	/**
+	 * Fetches a single citation's details - a small, ordinary JSON
+	 * response, not a stream - and, when its title matches a filename
+	 * in this site's media library, rewrites the "url" field so the
+	 * widget's "View source" link points at that local, publicly
+	 * downloadable file instead of CustomGPT's own account-gated
+	 * preview URL (see find_local_media_url_by_filename() above for
+	 * why: anonymous visitors get a 403 on the original URL).
+	 *
+	 * Deliberately separate from handle_proxy()'s streaming machinery
+	 * below - this response needs to be parsed and possibly modified
+	 * as a whole, which the character-by-character curl passthrough
+	 * used for the chat endpoint isn't set up for, and doesn't need to
+	 * be: unlike chat, there's no "typing" effect to preserve here.
+	 */
+	private function proxy_citation_request( $url, $api_key ) {
+		$response = wp_remote_get(
+			$url,
+			array(
+				'headers' => array(
+					'Authorization' => 'Bearer ' . $api_key,
+					'Accept'        => 'application/json',
+				),
+				'timeout' => 15,
+			)
+		);
+
+		if ( is_wp_error( $response ) ) {
+			status_header( 502 );
+			header( 'Content-Type: application/json' );
+			echo wp_json_encode(
+				array(
+					'error'   => 'Proxy request failed',
+					'details' => $response->get_error_message(),
+				)
+			);
+			return;
+		}
+
+		$code = (int) wp_remote_retrieve_response_code( $response );
+		$body = json_decode( wp_remote_retrieve_body( $response ), true );
+
+		if ( 200 === $code && is_array( $body ) && ! empty( $body['data'] ) && is_array( $body['data'] ) && ! empty( $body['data']['title'] ) ) {
+			$local_url = $this->find_local_media_url_by_filename( (string) $body['data']['title'] );
+			if ( $local_url ) {
+				$body['data']['url'] = $local_url;
+			}
+		}
+
+		status_header( $code );
+		header( 'Content-Type: application/json' );
+		echo wp_json_encode( $body );
+	}
+
+	/**
 	 * Server-side proxy. Forwards the widget's API calls to
 	 * app.customgpt.ai with the real API key attached, and streams the
 	 * response straight back (needed for the chat "typing" SSE stream).
@@ -1299,6 +1387,23 @@ final class CustomGPT_Chat_Widget_Plugin {
 		$url = CUSTOMGPT_API_BASE . $path;
 		if ( $extra_query ) {
 			$url .= '?' . $extra_query;
+		}
+
+		// Citation "View source" links need to work for anonymous site
+		// visitors too, but CustomGPT's own preview URLs
+		// (https://app.customgpt.ai/preview/...) require a logged-in
+		// CustomGPT account - a visitor without one gets a 403 there.
+		// This one specific, non-streaming endpoint is special-cased so
+		// its "url" can be swapped for a matching local media-library
+		// file when one exists; everything else (in particular the
+		// streaming chat endpoint below) is completely untouched.
+		if (
+			preg_match( '#^/projects/\d+/citations/\d+$#', $path )
+			&& isset( $_SERVER['REQUEST_METHOD'] )
+			&& 'GET' === strtoupper( sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) )
+		) {
+			$this->proxy_citation_request( $url, $api_key );
+			exit;
 		}
 
 		$method   = isset( $_SERVER['REQUEST_METHOD'] ) ? strtoupper( sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) ) : 'GET';
