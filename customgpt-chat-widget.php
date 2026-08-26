@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.9.0
+ * Version: 2.9.1
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1091,6 +1091,40 @@ final class CustomGPT_Chat_Widget_Plugin {
 						height: 1px !important;
 						width: 100% !important;
 					}
+					/* Loading overlay shown between clicking an example
+					   question/input on the REAL (already-mounted) widget's
+					   hero screen and the chat view actually mounting - see
+					   showHeroTransitionOverlay() below. Appended as a
+					   sibling of .customgpt-chat-embed, not inside it, so it
+					   can never be wiped by a React re-render. z-index sits
+					   above both the fullscreen widget (999999) and its
+					   backdrop (999998). */
+					#cgpt-transition-overlay {
+						position: fixed;
+						inset: 0;
+						z-index: 1000000;
+						background: rgba( 255, 255, 255, .7 );
+						display: flex;
+						align-items: center;
+						justify-content: center;
+						animation: cgpt-fade .2s ease both;
+					}
+					.cgpt-transition-spinner {
+						width: 36px;
+						height: 36px;
+						border: 4px solid #e5e7eb;
+						border-top-color: #E7534F;
+						border-radius: 50%;
+						animation: cgpt-transition-spin .7s linear infinite;
+					}
+					@keyframes cgpt-transition-spin {
+						to { transform: rotate( 360deg ); }
+					}
+					@media ( prefers-reduced-motion: reduce ) {
+						.cgpt-transition-spinner {
+							animation: none !important;
+						}
+					}
 					@keyframes cgpt-rise {
 						0%   { opacity: 0; transform: translateY( 28px ) scale( .96 ); }
 						100% { opacity: 1; transform: none; }
@@ -1176,6 +1210,75 @@ final class CustomGPT_Chat_Widget_Plugin {
 							resetAndDeactivate();
 						}
 					} );
+
+					// Loading overlay for the REAL (already-mounted)
+					// widget's hero screen. cgpt-active flips to true
+					// within milliseconds of clicking an example question
+					// or submitting the input (confirmed live via network
+					// tracing), and the popup expands to fullscreen just as
+					// fast - but the hero screen underneath (heading,
+					// tagline, chips) doesn't change until the chat view
+					// actually mounts, which depends on real network calls
+					// (creating a conversation, fetching settings) that can
+					// take several seconds, especially for the first
+					// message of a session. Without this, that wait reads
+					// as the whole widget freezing. cgpt-hero-wrap and
+					// cgpt-msg-row are the compiled bundle's own dedicated
+					// hook classes (confirmed in dist/widget/ - not
+					// Tailwind utilities, so they're stable to select on)
+					// for the hero screen and an individual chat message
+					// row respectively; there's no dedicated class for the
+					// chat container itself, so "hero gone or a message
+					// row exists" is the most reliable signal available
+					// that the transition finished.
+					function showHeroTransitionOverlay() {
+						if ( document.getElementById( 'cgpt-transition-overlay' ) ) {
+							return;
+						}
+						var overlay = document.createElement( 'div' );
+						overlay.id = 'cgpt-transition-overlay';
+						overlay.innerHTML = '<div class="cgpt-transition-spinner"></div>';
+						document.body.appendChild( overlay );
+
+						var removed = false;
+						function remove() {
+							if ( removed ) {
+								return;
+							}
+							removed = true;
+							observer.disconnect();
+							clearTimeout( safetyTimer );
+							if ( overlay.parentNode ) {
+								overlay.parentNode.removeChild( overlay );
+							}
+						}
+
+						var observer = new MutationObserver( function () {
+							if ( ! document.querySelector( '.cgpt-hero-wrap' ) || document.querySelector( '.cgpt-msg-row' ) ) {
+								remove();
+							}
+						} );
+						observer.observe( document.body, { childList: true, subtree: true } );
+
+						// Safety net: never leave the overlay up
+						// indefinitely if the expected DOM signal never
+						// arrives for some unrelated reason (a bundle
+						// error, a genuinely failed request, etc.) - it's
+						// far better to silently reveal whatever state the
+						// widget is actually in than to leave a spinner up
+						// forever.
+						var safetyTimer = setTimeout( remove, 20000 );
+					}
+
+					document.addEventListener(
+						'click',
+						function ( e ) {
+							if ( e.target.closest && e.target.closest( '.cgpt-hero-wrap' ) ) {
+								showHeroTransitionOverlay();
+							}
+						},
+						true
+					);
 
 					// SSR-placeholder loading affordance (see the matching
 					// CSS in render_hero_placeholder_html()). The
