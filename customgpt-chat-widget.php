@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.9.1
+ * Version: 2.9.3
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1102,8 +1102,13 @@ final class CustomGPT_Chat_Widget_Plugin {
 					#cgpt-transition-overlay {
 						position: fixed;
 						inset: 0;
+						margin: auto;
 						z-index: 1000000;
-						background: rgba( 255, 255, 255, .7 );
+						width: min( 95%, 1200px );
+						height: min( 800px, 90vh );
+						max-height: 90vh;
+						border-radius: 4px;
+						background: #fff;
 						display: flex;
 						align-items: center;
 						justify-content: center;
@@ -1116,6 +1121,17 @@ final class CustomGPT_Chat_Widget_Plugin {
 						border-top-color: #E7534F;
 						border-radius: 50%;
 						animation: cgpt-transition-spin .7s linear infinite;
+					}
+					/* Actually hides the real widget's own content while
+					   the overlay above is up, rather than only relying on
+					   the overlay's opacity/z-index to visually mask it -
+					   an opaque overlay can still show faint bleed-through
+					   depending on stacking context, this can't. Purely a
+					   stylesheet rule (no DOM/attribute changes), so it's
+					   safe from React re-renders and reverts instantly
+					   just by removing the body class. */
+					body.cgpt-content-hidden .customgpt-chat-embed > * {
+						visibility: hidden !important;
 					}
 					@keyframes cgpt-transition-spin {
 						to { transform: rotate( 360deg ); }
@@ -1239,6 +1255,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 						overlay.id = 'cgpt-transition-overlay';
 						overlay.innerHTML = '<div class="cgpt-transition-spinner"></div>';
 						document.body.appendChild( overlay );
+						document.body.classList.add( 'cgpt-content-hidden' );
 
 						var removed = false;
 						function remove() {
@@ -1248,6 +1265,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 							removed = true;
 							observer.disconnect();
 							clearTimeout( safetyTimer );
+							document.body.classList.remove( 'cgpt-content-hidden' );
 							if ( overlay.parentNode ) {
 								overlay.parentNode.removeChild( overlay );
 							}
