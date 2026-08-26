@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.5.0
+ * Version: 2.5.1
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1265,10 +1265,31 @@ final class CustomGPT_Chat_Widget_Plugin {
 		}
 
 		global $wpdb;
+
+		// Matches only on a real path boundary - either the whole
+		// stored value (a file uploaded with no year/month subfolder)
+		// or right after a "/" (e.g. "2026/08/<filename>") - not just
+		// any suffix. A plain "%filename" LIKE would also match an
+		// unrelated, longer filename that merely happens to end with
+		// this one (e.g. "XYZ-CIO-Persona-Profile-v.2.pdf").
+		//
+		// If more than one attachment still matches (the same filename
+		// genuinely uploaded more than once, e.g. into different month
+		// folders), the most recently uploaded one wins - WordPress
+		// already renames on collision instead of silently overwriting,
+		// so two distinct attachments sharing an exact filename are
+		// either an intentional re-upload/replacement (newest is
+		// correct) or a coincidence (arbitrary either way, and newest
+		// is the least surprising default).
+		$escaped = $wpdb->esc_like( $filename );
 		$attachment_id = $wpdb->get_var(
 			$wpdb->prepare(
-				"SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '_wp_attached_file' AND meta_value LIKE %s ORDER BY post_id DESC LIMIT 1",
-				'%' . $wpdb->esc_like( $filename )
+				"SELECT post_id FROM {$wpdb->postmeta}
+				WHERE meta_key = '_wp_attached_file'
+				AND ( meta_value = %s OR meta_value LIKE %s )
+				ORDER BY post_id DESC LIMIT 1",
+				$filename,
+				'%/' . $escaped
 			)
 		);
 
