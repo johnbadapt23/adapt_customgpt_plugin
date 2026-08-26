@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.7.0
+ * Version: 2.7.1
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1036,6 +1036,16 @@ final class CustomGPT_Chat_Widget_Plugin {
 						font-size: 14px !important;
 						font-weight: 700 !important;
 						color: #838383 !important;
+					}
+					/* Tailwind Typography writes its .prose hr rule with
+					   :where(), which has zero specificity on purpose (so
+					   consumers can override it) - meaning almost any
+					   normal-specificity hr rule from the host theme beats
+					   it, collapsing the divider to invisible. Restore it
+					   here, scoped to just this widget. */
+					.customgpt-chat-embed .prose hr {
+						height: 1px !important;
+						width: 100% !important;
 					}
 					@keyframes cgpt-rise {
 						0%   { opacity: 0; transform: translateY( 28px ) scale( .96 ); }
