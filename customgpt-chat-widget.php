@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.6.0
+ * Version: 2.7.0
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1259,9 +1259,15 @@ final class CustomGPT_Chat_Widget_Plugin {
 	 * exact filename match, never fuzzy - this only widens which exact
 	 * filename gets tried, not how loosely each one matches.
 	 *
-	 * Returns null - leaving the citation's original CustomGPT url
-	 * untouched - if nothing matches at all, or the title doesn't look
-	 * like a real filename.
+	 * Returns null - leaving the citation's original CustomGPT url (and
+	 * title) untouched - if nothing matches at all, or the title
+	 * doesn't look like a real filename. On a match, returns an array
+	 * with both the local 'url' and the 'filename' that actually
+	 * matched - the caller uses the latter to correct the displayed
+	 * title too when a fallback extension is what matched (e.g. a
+	 * citation titled "CFOs-Budget-Playbook.pdf" that only matched
+	 * "CFOs-Budget-Playbook.pptx" in the media library should say
+	 * ".pptx" in the widget too, not still claim to be the PDF).
 	 */
 	private function find_local_media_url_by_filename( $filename ) {
 		$filename = trim( (string) $filename );
@@ -1271,7 +1277,10 @@ final class CustomGPT_Chat_Widget_Plugin {
 
 		$url = $this->find_attachment_url_by_exact_filename( $filename );
 		if ( $url ) {
-			return $url;
+			return array(
+				'url'      => $url,
+				'filename' => $filename,
+			);
 		}
 
 		$dot          = strrpos( $filename, '.' );
@@ -1282,9 +1291,13 @@ final class CustomGPT_Chat_Widget_Plugin {
 			if ( $fallback_ext === $original_ext ) {
 				continue; // Already tried above.
 			}
-			$url = $this->find_attachment_url_by_exact_filename( $base_name . '.' . $fallback_ext );
+			$candidate_filename = $base_name . '.' . $fallback_ext;
+			$url                = $this->find_attachment_url_by_exact_filename( $candidate_filename );
 			if ( $url ) {
-				return $url;
+				return array(
+					'url'      => $url,
+					'filename' => $candidate_filename,
+				);
 			}
 		}
 
@@ -1338,6 +1351,35 @@ final class CustomGPT_Chat_Widget_Plugin {
 	}
 
 	/**
+	 * Office documents (PowerPoint/Word) don't render natively in a
+	 * browser tab the way a PDF does - opening the raw file URL would
+	 * just force a download instead of letting the visitor view it,
+	 * same problem this whole citation-rewriting feature exists to
+	 * avoid. There's no practical way to convert these to PDF
+	 * server-side here (no LibreOffice or equivalent on typical
+	 * WordPress hosting, and even where available a real conversion
+	 * takes several seconds and would need its own caching layer) - so
+	 * instead this routes the URL through Microsoft's free, public
+	 * Office Online viewer, which renders the file inline in the
+	 * browser given just its public URL. No conversion, no caching, no
+	 * extra infrastructure - only changes behavior for the non-PDF
+	 * fallback formats; an actual PDF match is returned as-is, since
+	 * browsers already render those natively.
+	 *
+	 * Requires the file's URL to be reachable from the public internet
+	 * (Microsoft's servers have to be able to fetch it) - won't work if
+	 * this site sits behind an IP allowlist, HTTP Basic Auth, or
+	 * similar staging-only access restriction.
+	 */
+	private function maybe_wrap_in_office_viewer( $url, $filename ) {
+		$ext = strtolower( pathinfo( $filename, PATHINFO_EXTENSION ) );
+		if ( ! in_array( $ext, array( 'pptx', 'ppt', 'docx', 'doc' ), true ) ) {
+			return $url;
+		}
+		return 'https://view.officeapps.live.com/op/view.aspx?src=' . rawurlencode( $url );
+	}
+
+	/**
 	 * Fetches a single citation's details - a small, ordinary JSON
 	 * response, not a stream - and, when its title matches a filename
 	 * in this site's media library, rewrites the "url" field so the
@@ -1380,9 +1422,18 @@ final class CustomGPT_Chat_Widget_Plugin {
 		$body = json_decode( wp_remote_retrieve_body( $response ), true );
 
 		if ( 200 === $code && is_array( $body ) && ! empty( $body['data'] ) && is_array( $body['data'] ) && ! empty( $body['data']['title'] ) ) {
-			$local_url = $this->find_local_media_url_by_filename( (string) $body['data']['title'] );
-			if ( $local_url ) {
-				$body['data']['url'] = $local_url;
+			$original_title = (string) $body['data']['title'];
+			$match          = $this->find_local_media_url_by_filename( $original_title );
+			if ( $match ) {
+				$body['data']['url'] = $this->maybe_wrap_in_office_viewer( $match['url'], $match['filename'] );
+				// Reflect the matched file's actual extension in the
+				// displayed title too, so a citation that only matched
+				// via the fallback extensions above (e.g. found a
+				// .pptx for a citation titled ".pdf") doesn't show a
+				// filename that doesn't match what actually opens.
+				if ( $match['filename'] !== $original_title ) {
+					$body['data']['title'] = $match['filename'];
+				}
 			}
 		}
 
