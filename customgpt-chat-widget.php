@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.8.1
+ * Version: 2.8.2
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1193,6 +1193,63 @@ final class CustomGPT_Chat_Widget_Plugin {
 							if ( hero ) {
 								hero.classList.add( 'cgpt-ssr-loading' );
 							}
+						},
+						true
+					);
+
+					// Retry-once workaround for a first-click race inside the
+					// REAL (already-mounted) widget bundle itself - distinct
+					// from the SSR-placeholder case above. Confirmed live:
+					// on the very first click after a page loads, the
+					// example-question/input buttons can already be
+					// painted and focusable (they visibly take focus)
+					// before their own onClick handler is actually wired
+					// up inside the compiled bundle - so the click does
+					// nothing else: no conversation starts, cgpt-active
+					// never gets added. Every later click on the same
+					// button works fine. This is inside
+					// dist/widget/customgpt-widget.b16.min.js, a pre-built
+					// third-party bundle we don't edit, so we can't fix the
+					// handler wiring directly - instead, if a click lands
+					// inside a mounted widget and cgpt-active still hasn't
+					// appeared shortly after, replay the same click once.
+					// By then the real handler is virtually always
+					// attached, so the replay behaves exactly like any
+					// other click on an already-interactive widget.
+					// Excludes the SSR placeholder (handled above) since
+					// replaying a click there can never help - React
+					// replaces that markup outright rather than attaching
+					// handlers to it.
+					var retriedClickTargets = new WeakSet();
+					document.addEventListener(
+						'click',
+						function ( e ) {
+							if ( document.body.classList.contains( 'cgpt-active' ) ) {
+								return;
+							}
+							if ( ! ( e.target.closest && e.target.closest( '.customgpt-chat-embed' ) ) ) {
+								return;
+							}
+							if ( e.target.closest( '.cgpt-ssr-chip, .cgpt-ssr-input' ) ) {
+								return;
+							}
+							if ( isOwnChromeButton( e.target ) ) {
+								return;
+							}
+							var target = e.target;
+							if ( retriedClickTargets.has( target ) ) {
+								return;
+							}
+							setTimeout( function () {
+								if ( document.body.classList.contains( 'cgpt-active' ) ) {
+									return;
+								}
+								if ( ! document.body.contains( target ) ) {
+									return;
+								}
+								retriedClickTargets.add( target );
+								target.dispatchEvent( new MouseEvent( 'click', { bubbles: true, cancelable: true, view: window } ) );
+							}, 400 );
 						},
 						true
 					);
