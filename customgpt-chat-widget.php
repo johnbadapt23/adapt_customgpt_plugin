@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.8.0
+ * Version: 2.8.1
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1176,7 +1176,12 @@ final class CustomGPT_Chat_Widget_Plugin {
 					// with the same click once they're attached; once React
 					// mounts it removes this markup entirely, so this
 					// listener simply stops matching anything on later
-					// clicks.
+					// clicks. (This whole hook must run at a lower
+					// wp_footer priority than enqueue_widget_script()'s -
+					// see the priority argument a few lines below - or the
+					// blocking <script src="vendors.b16.min.js"> tag prints
+					// before this listener is even attached, defeating the
+					// entire point.)
 					document.addEventListener(
 						'click',
 						function ( e ) {
@@ -1212,7 +1217,17 @@ final class CustomGPT_Chat_Widget_Plugin {
 				</script>
 				<?php
 			},
-			20
+			// Must be lower than enqueue_widget_script()'s wp_footer
+			// priority (20) - both this closure's click/focus listeners
+			// and the SSR-placeholder loading-affordance listener above
+			// need to be attached before the blocking
+			// vendors.b16.min.js/customgpt-widget.b16.min.js <script src>
+			// tags print, or a click that lands while those are still
+			// downloading has nothing to catch it. This used to say
+			// "priority 1" in a comment without the code actually using
+			// it - both hooks were really running at 20, in registration
+			// order, so this one was consistently losing the race.
+			1
 		);
 	}
 
