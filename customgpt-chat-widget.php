@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.11.2
+ * Version: 2.11.3
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1456,28 +1456,64 @@ final class CustomGPT_Chat_Widget_Plugin {
 					document.addEventListener(
 						'click',
 						function ( e ) {
-							// Only an actual example-question chip should
-							// ever show this overlay - not a click anywhere
-							// else in the hero box (the textarea, its
-							// padding, the card background, etc.). The
-							// compiled bundle gives the chip buttons no
-							// dedicated class of their own (confirmed by
-							// reading the minified source: they're plain
-							// Tailwind-styled <button> elements, unlike
-							// cgpt-hero-card/cgpt-input-row which DO have
-							// stable classes) - so a chip is identified
-							// structurally instead: a <button> inside
-							// .cgpt-hero-card that ISN'T part of the input
-							// row (which holds the textarea and send
-							// button). This also means clicking the
-							// textarea itself never matches at all, since a
-							// textarea isn't a button - no separate
-							// exclusion needed for it.
-							var chip = e.target.closest && e.target.closest( '.cgpt-hero-card button' );
-							if ( ! chip ) {
+							// A real submission on the hero screen happens
+							// one of two ways: clicking an example-question
+							// chip, or clicking the send button after
+							// typing. Both should show this overlay -
+							// nothing else in the hero box (the textarea,
+							// its padding, the card background, any other
+							// icon button that isn't a submit trigger)
+							// should. The compiled bundle gives neither the
+							// chips nor the send button a dedicated class
+							// (confirmed by reading the minified source),
+							// but the send button IS reliably
+							// type="submit" (the only other type="submit"
+							// button in the whole bundle lives in an
+							// unrelated settings form, never inside
+							// .cgpt-hero-card) - so a click counts as a
+							// real submit trigger when it's ANY button
+							// inside .cgpt-hero-card that's either outside
+							// the input row (a chip) or is itself the
+							// type="submit" send button.
+							var button = e.target.closest && e.target.closest( '.cgpt-hero-card button' );
+							if ( ! button ) {
 								return;
 							}
-							if ( chip.closest( '.cgpt-input-row' ) || chip.closest( '.cgpt-input-wrap' ) ) {
+							var isSendButton  = 'submit' === ( button.getAttribute( 'type' ) || '' ).toLowerCase();
+							var isInInputArea = !! ( button.closest( '.cgpt-input-row' ) || button.closest( '.cgpt-input-wrap' ) );
+							if ( isInInputArea && ! isSendButton ) {
+								return;
+							}
+							showHeroTransitionOverlay();
+						},
+						true
+					);
+
+					// Enter-to-submit on the hero's own textarea calls the
+					// exact same submit handler the send button does
+					// (confirmed in the compiled bundle: both the
+					// textarea's onKeyDown and the form's onSubmit call
+					// the same function) - but it's a keydown, not a
+					// click, so the click listener above never catches it
+					// on its own. Without this, submitting by pressing
+					// Enter shows no loading affordance at all while the
+					// conversation is created - the exact frozen-hero bug
+					// this overlay exists to fix, just reached through a
+					// different input method.
+					document.addEventListener(
+						'keydown',
+						function ( e ) {
+							if ( 'Enter' !== e.key || e.shiftKey ) {
+								return;
+							}
+							var target = e.target;
+							if ( ! target || 'TEXTAREA' !== target.tagName ) {
+								return;
+							}
+							if ( ! target.closest || ! target.closest( '.cgpt-hero-card' ) ) {
+								return;
+							}
+							if ( ! target.value || ! target.value.trim() ) {
 								return;
 							}
 							showHeroTransitionOverlay();
