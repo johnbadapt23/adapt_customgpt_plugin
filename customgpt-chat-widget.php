@@ -1456,21 +1456,31 @@ final class CustomGPT_Chat_Widget_Plugin {
 					document.addEventListener(
 						'click',
 						function ( e ) {
-							// Clicking into the textarea itself is just
-							// focusing it to type - not a submission. Only a
-							// real submit trigger (an example-question chip,
-							// or the send button) should ever show this
-							// overlay; excluding the textarea (and anything
-							// inside it, e.g. its placeholder text node)
-							// stops the loader from popping up the instant
-							// someone clicks in to type, which blocked
-							// typing entirely while it was up.
-							if ( e.target.closest && e.target.closest( 'textarea' ) ) {
+							// Only an actual example-question chip should
+							// ever show this overlay - not a click anywhere
+							// else in the hero box (the textarea, its
+							// padding, the card background, etc.). The
+							// compiled bundle gives the chip buttons no
+							// dedicated class of their own (confirmed by
+							// reading the minified source: they're plain
+							// Tailwind-styled <button> elements, unlike
+							// cgpt-hero-card/cgpt-input-row which DO have
+							// stable classes) - so a chip is identified
+							// structurally instead: a <button> inside
+							// .cgpt-hero-card that ISN'T part of the input
+							// row (which holds the textarea and send
+							// button). This also means clicking the
+							// textarea itself never matches at all, since a
+							// textarea isn't a button - no separate
+							// exclusion needed for it.
+							var chip = e.target.closest && e.target.closest( '.cgpt-hero-card button' );
+							if ( ! chip ) {
 								return;
 							}
-							if ( e.target.closest && e.target.closest( '.cgpt-hero-wrap' ) ) {
-								showHeroTransitionOverlay();
+							if ( chip.closest( '.cgpt-input-row' ) || chip.closest( '.cgpt-input-wrap' ) ) {
+								return;
 							}
+							showHeroTransitionOverlay();
 						},
 						true
 					);
