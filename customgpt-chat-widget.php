@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.11.0
+ * Version: 2.11.1
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1456,6 +1456,18 @@ final class CustomGPT_Chat_Widget_Plugin {
 					document.addEventListener(
 						'click',
 						function ( e ) {
+							// Clicking into the textarea itself is just
+							// focusing it to type - not a submission. Only a
+							// real submit trigger (an example-question chip,
+							// or the send button) should ever show this
+							// overlay; excluding the textarea (and anything
+							// inside it, e.g. its placeholder text node)
+							// stops the loader from popping up the instant
+							// someone clicks in to type, which blocked
+							// typing entirely while it was up.
+							if ( e.target.closest && e.target.closest( 'textarea' ) ) {
+								return;
+							}
 							if ( e.target.closest && e.target.closest( '.cgpt-hero-wrap' ) ) {
 								showHeroTransitionOverlay();
 							}
