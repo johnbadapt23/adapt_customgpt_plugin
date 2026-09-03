@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.11.3
+ * Version: 2.12.0
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -148,6 +148,15 @@ final class CustomGPT_Chat_Widget_Plugin {
 	private static $active_class_wired           = false;
 	private static $heading_patch_wired          = false;
 	private static $hero_placeholder_style_wired = false;
+	// Whether every [customgpt_chat] instance seen on this page so far
+	// is "embedded" mode. Only embedded mode has an SSR placeholder to
+	// hang a "load the JS bundle on first interaction" trigger off of
+	// (see enqueue_widget_script()/enqueue_active_class_behavior()) - if
+	// even one "floating" instance shows up, the whole page's bundle
+	// load falls back to happening immediately in wp_footer, same as
+	// this plugin always did before lazy-loading existed, since a
+	// floating widget has no hero screen to click on first.
+	private static $lazy_load_eligible = true;
 
 	public function __construct() {
 		add_shortcode( 'customgpt_chat', array( $this, 'render_shortcode' ) );
@@ -964,19 +973,27 @@ final class CustomGPT_Chat_Widget_Plugin {
 			$this->enqueue_active_class_behavior();
 			$this->enqueue_heading_patch_behavior();
 		} else {
-			$config['position'] = $atts['position'];
+			$config['position']        = $atts['position'];
+			self::$lazy_load_eligible = false;
 		}
 		?>
 		<script nowprocket data-no-minify="1">
 		( function () {
 			function initCustomGPT() {
-				if ( typeof CustomGPTWidget === 'undefined' ) {
-					setTimeout( initCustomGPT, 50 );
-					return;
-				}
 				CustomGPTWidget.init( <?php echo wp_json_encode( $config, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP ); ?> );
 			}
-			initCustomGPT();
+			// Doesn't call CustomGPTWidget.init() itself, and doesn't poll
+			// for CustomGPTWidget to become defined either - the JS bundle
+			// that defines it is no longer loaded unconditionally at page
+			// load (see enqueue_widget_script()/enqueue_active_class_behavior()
+			// for why: every page load was eagerly creating a real,
+			// permanently orphaned CustomGPT conversation even for visitors
+			// who never opened the chat, confirmed live - nearly 2000
+			// leaked conversations/localStorage entries from testing alone).
+			// This just registers itself to run once the bundle actually
+			// finishes loading, whenever that ends up being triggered.
+			window.__cgptPendingInits = window.__cgptPendingInits || [];
+			window.__cgptPendingInits.push( initCustomGPT );
 		} )();
 		</script>
 		<?php
@@ -1058,54 +1075,121 @@ final class CustomGPT_Chat_Widget_Plugin {
 		add_action(
 			'wp_footer',
 			function () use ( $widget_src, $vendors_src, $css_src, $has_vendors, $has_css, $chunk_srcs ) {
-				if ( $has_css ) {
-					printf(
-						'<link rel="stylesheet" href="%s" />' . "\n",
-						esc_url( $css_src )
-					);
-				}
-				// vendors.js and every *.chunk.js file must load and
-				// execute BEFORE customgpt-widget.js. The widget bundle
-				// reads from them synchronously on startup rather than
-				// fetching them lazily the way webpack normally would.
-				// Skipping any of them throws "Cannot read properties of
-				// undefined (reading 'default')" partway through init —
-				// CustomGPTWidget may still get defined, but agent
-				// settings (welcome text, example questions) silently
-				// fail to load and generic fallback text is shown instead.
-				if ( $has_vendors ) {
-					printf(
-						'<script nowprocket data-no-minify="1" src="%s"></script>' . "\n",
-						esc_url( $vendors_src )
-					);
-				}
-				foreach ( $chunk_srcs as $chunk_src ) {
-					printf(
-						'<script nowprocket data-no-minify="1" src="%s"></script>' . "\n",
-						esc_url( $chunk_src )
-					);
-				}
-				printf(
-					'<script nowprocket data-no-minify="1" src="%s"></script>' . "\n",
-					esc_url( $widget_src )
+				$bundle_urls = array(
+					'css'     => $has_css ? $css_src : null,
+					'vendors' => $has_vendors ? $vendors_src : null,
+					'chunks'  => $chunk_srcs,
+					'widget'  => $widget_src,
 				);
+				?>
+				<script nowprocket data-no-minify="1">
+				( function () {
+					// Loads the widget bundle (CSS + vendors.js + every
+					// *.chunk.js + customgpt-widget.js) ON DEMAND instead of
+					// as blocking <script src> tags printed unconditionally
+					// into every page load. That old approach had two real
+					// costs, both confirmed live on this site: ~13
+					// synchronous, undequeueable script tags (this plugin
+					// prints them directly rather than through
+					// wp_enqueue_script(), so no theme/optimization plugin
+					// can defer them) adding real weight before
+					// DOMContentLoaded on every single pageview, AND -
+					// worse - CustomGPTWidget.init() firing immediately for
+					// everyone meant a real POST /conversations on the
+					// CustomGPT backend for every visitor, whether or not
+					// they ever opened the chat. Confirmed via localStorage
+					// inspection: nearly 2000 permanently orphaned
+					// conversations accumulated from testing alone. The
+					// bundle's own compiled code has no config flag to
+					// disable this (checked directly), so this has to be
+					// solved by controlling WHEN the bundle loads at all
+					// instead.
+					//
+					// vendors.js and every *.chunk.js file must still load
+					// and execute BEFORE customgpt-widget.js - same
+					// dependency as before, just resolved with chained
+					// promises instead of synchronous script order.
+					// Skipping any of them throws "Cannot read properties
+					// of undefined (reading 'default')" partway through
+					// init.
+					//
+					// The vendors.js/widget.js/CSS bytes are already
+					// preloaded via <link rel="preload"> in <head> (see
+					// maybe_print_resource_hints()) purely for LCP, so by
+					// the time anything actually calls this function
+					// they're normally already sitting in the browser's
+					// cache - this just controls when they're allowed to
+					// EXECUTE, not when they're allowed to download.
+					var bundleUrls = <?php echo wp_json_encode( $bundle_urls, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP ); ?>;
+					var loading = false;
+					var ready   = false;
+
+					function loadScript( src ) {
+						return new Promise( function ( resolve, reject ) {
+							var s = document.createElement( 'script' );
+							s.src = src;
+							s.setAttribute( 'nowprocket', '' );
+							s.setAttribute( 'data-no-minify', '1' );
+							s.onload  = resolve;
+							s.onerror = reject;
+							document.body.appendChild( s );
+						} );
+					}
+
+					window.__cgptStartWidgetLoad = function () {
+						if ( ready || loading ) {
+							return;
+						}
+						loading = true;
+
+						if ( bundleUrls.css ) {
+							var link = document.createElement( 'link' );
+							link.rel  = 'stylesheet';
+							link.href = bundleUrls.css;
+							document.head.appendChild( link );
+						}
+
+						( bundleUrls.vendors ? loadScript( bundleUrls.vendors ) : Promise.resolve() )
+							.then( function () {
+								return Promise.all( ( bundleUrls.chunks || [] ).map( loadScript ) );
+							} )
+							.then( function () {
+								return loadScript( bundleUrls.widget );
+							} )
+							.then( function () {
+								ready = true;
+								var pending = window.__cgptPendingInits || [];
+								window.__cgptPendingInits = [];
+								pending.forEach( function ( fn ) {
+									fn();
+								} );
+							} )
+							.catch( function () {
+								// Let a later trigger (another click) retry
+								// rather than getting permanently stuck.
+								loading = false;
+							} );
+					};
+
+					<?php if ( ! self::$lazy_load_eligible ) : ?>
+					// A non-"embedded" [customgpt_chat] instance exists on
+					// this page (e.g. "floating") - it has no SSR
+					// placeholder/hero screen to hang a "load on first
+					// interaction" trigger off of, so fall back to loading
+					// immediately here, same as this plugin always did
+					// before lazy-loading existed for the embedded hero.
+					window.__cgptStartWidgetLoad();
+					<?php endif; ?>
+				} )();
+				</script>
+				<?php
 			},
-			// Runs AFTER enqueue_active_class_behavior()'s wp_footer hook
-			// (priority 1) on purpose: the click/focus listeners that expand
-			// the widget to fullscreen must be attached to the document
-			// before the browser starts downloading and executing this
-			// bundle (vendors.js + every *.chunk.js + customgpt-widget.js,
-			// several hundred KB combined), not after. Otherwise a click
-			// that lands while that bundle is still loading/parsing (very
-			// plausible - a real visitor's first click on the page often
-			// happens within the first second or two) has no listener to
-			// catch it yet, so nothing visibly happens until the bundle
-			// finishes loading and React's own onClick handler takes over -
-			// which can be several seconds later on a slow connection or
-			// a busy main thread. The generic document-level listener has
-			// no such dependency, since it only needs the container element
-			// (already present in the initial HTML) to exist, not any JS
-			// bundle to have finished loading.
+			// Priority no longer matters relative to
+			// enqueue_active_class_behavior()'s wp_footer hook the way it
+			// used to - this hook no longer prints any blocking
+			// <script src> tags for enqueue_active_class_behavior()'s
+			// click listeners to race against. Left at 20 anyway since
+			// there's no reason to change it.
 			20
 		);
 	}
@@ -1526,23 +1610,22 @@ final class CustomGPT_Chat_Widget_Plugin {
 					// placeholder's chips/input are plain markup with no
 					// handler of their own until the real widget bundle
 					// finishes loading and replaces this container's
-					// contents outright - if a visitor's first click on the
-					// page lands on one of them before that swap happens,
-					// this gives instant visual feedback (spinner, disabled
-					// state) instead of leaving them looking at an
-					// unresponsive placeholder for however long the bundle
-					// takes to load and mount. Capture phase, and never
-					// calls preventDefault/stopPropagation, so it can never
-					// block whatever the widget bundle's own handlers do
-					// with the same click once they're attached; once React
-					// mounts it removes this markup entirely, so this
-					// listener simply stops matching anything on later
-					// clicks. (This whole hook must run at a lower
-					// wp_footer priority than enqueue_widget_script()'s -
-					// see the priority argument a few lines below - or the
-					// blocking <script src="vendors.b16.min.js"> tag prints
-					// before this listener is even attached, defeating the
-					// entire point.)
+					// contents outright - this gives instant visual
+					// feedback (spinner, disabled state) instead of leaving
+					// a visitor looking at an unresponsive placeholder.
+					// This click is now also THE trigger that starts the
+					// JS bundle loading at all (see
+					// enqueue_widget_script()) - the bundle no longer loads
+					// unconditionally at page load, specifically so
+					// visitors who never touch the widget never cause a
+					// CustomGPT conversation to be created. Capture phase,
+					// and never calls preventDefault/stopPropagation, so it
+					// can never block whatever the widget bundle's own
+					// handlers do with the same click once they're
+					// attached; once React mounts it removes this markup
+					// entirely, so this listener simply stops matching
+					// anything on later clicks.
+					var pendingSsrIntent = null;
 					document.addEventListener(
 						'click',
 						function ( e ) {
@@ -1554,9 +1637,63 @@ final class CustomGPT_Chat_Widget_Plugin {
 							if ( hero ) {
 								hero.classList.add( 'cgpt-ssr-loading' );
 							}
+							// Remember what the visitor was trying to do so
+							// it can be replayed against the REAL hero
+							// screen once the bundle finishes loading and
+							// mounts (see replaySsrIntent() below) - the
+							// SSR placeholder has no handler of its own to
+							// act on this click itself, so without this the
+							// click would otherwise just vanish and the
+							// visitor would have to click again once the
+							// real widget appears.
+							pendingSsrIntent = target.closest( '.cgpt-ssr-chip' )
+								? { type: 'chip', text: target.textContent }
+								: { type: 'input' };
+							if ( window.__cgptStartWidgetLoad ) {
+								window.__cgptStartWidgetLoad();
+							}
 						},
 						true
 					);
+
+					// Replays pendingSsrIntent (set above) against the
+					// REAL, now-mounted hero screen the first time one
+					// shows up in the DOM. Chip identification is by exact
+					// text match (the compiled bundle gives chip buttons no
+					// class of their own - see the send-button/chip
+					// selectors used elsewhere in this file for the same
+					// reason); a plain click on the SSR input box just
+					// focuses the real textarea, since there's no typed
+					// text to actually submit on its behalf.
+					function replaySsrIntent() {
+						if ( ! pendingSsrIntent ) {
+							return;
+						}
+						var card = document.querySelector( '.customgpt-chat-embed .cgpt-hero-card' );
+						if ( ! card ) {
+							return;
+						}
+						var intent = pendingSsrIntent;
+						pendingSsrIntent = null;
+						if ( 'chip' === intent.type ) {
+							var buttons = card.querySelectorAll( 'button' );
+							for ( var i = 0; i < buttons.length; i++ ) {
+								if ( buttons[ i ].closest( '.cgpt-input-row' ) || buttons[ i ].closest( '.cgpt-input-wrap' ) ) {
+									continue;
+								}
+								if ( buttons[ i ].textContent.trim() === intent.text.trim() ) {
+									buttons[ i ].click();
+									return;
+								}
+							}
+						} else {
+							var textarea = card.querySelector( 'textarea' );
+							if ( textarea ) {
+								textarea.focus();
+							}
+						}
+					}
+					new MutationObserver( replaySsrIntent ).observe( document.body, { childList: true, subtree: true } );
 
 					// Retry-once workaround for a first-click race inside the
 					// REAL (already-mounted) widget bundle itself - distinct
