@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.12.4
+ * Version: 2.12.5
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1136,18 +1136,28 @@ final class CustomGPT_Chat_Widget_Plugin {
 						} );
 					}
 
-					// Runs fn as soon as the browser has a spare moment,
-					// instead of forcing it into the current task - falls
-					// back to a plain setTimeout (Safari has no
-					// requestIdleCallback) and caps the wait at 1.5s either
-					// way so it never waits indefinitely on a page that's
-					// continuously busy.
+					// Reproduced live: requestIdleCallback's "timeout"
+					// option is only a best-effort guarantee, not a real
+					// one. Clicking a chip immediately after the SSR hero
+					// paints - before this heavy page's other scripts
+					// (GTM, HubSpot, MemberPress, a separate
+					// cdn.customgpt.ai chat-toggle embed, etc.) finish
+					// their own startup work - captured a case where the
+					// idle callback never fired at all, not even after
+					// its 1500ms timeout: the tab stayed genuinely
+					// unresponsive for 30+ seconds, __cgptStartWidgetLoad
+					// never got past this gate, none of the real bundle's
+					// <script> tags were ever added to the page, and
+					// window.CustomGPTWidget stayed undefined - the exact
+					// permanent-looking hang being reported. A plain
+					// setTimeout still gets the actual bundle-loading work
+					// off of the click handler's own call stack (the
+					// original goal here), but Chrome schedules it far
+					// more reliably than an idle callback under
+					// contention - it doesn't wait for true idle time, so
+					// it can't be starved the same way.
 					function runWhenIdle( fn ) {
-						if ( window.requestIdleCallback ) {
-							window.requestIdleCallback( fn, { timeout: 1500 } );
-						} else {
-							setTimeout( fn, 0 );
-						}
+						setTimeout( fn, 50 );
 					}
 
 					window.__cgptStartWidgetLoad = function () {
