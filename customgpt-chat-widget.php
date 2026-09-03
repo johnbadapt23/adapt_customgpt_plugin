@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.12.1
+ * Version: 2.12.2
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1142,20 +1142,43 @@ final class CustomGPT_Chat_Widget_Plugin {
 						}
 						loading = true;
 
+						// CSS and the JS bundle download in parallel for
+						// speed, but BOTH must finish before anything is
+						// allowed to call CustomGPTWidget.init() - the real
+						// widget's whole layout is built entirely on
+						// Tailwind utility classes, so mounting even one
+						// tick before the stylesheet finishes loading
+						// renders it completely unstyled (effectively
+						// invisible - missing heading, chips, everything)
+						// until the CSS catches up a moment later. Confirmed
+						// live: without this, the popup opens showing a
+						// blank box for a noticeable stretch before the
+						// real hero content suddenly appears.
+						var cssPromise = Promise.resolve();
 						if ( bundleUrls.css ) {
-							var link = document.createElement( 'link' );
-							link.rel  = 'stylesheet';
-							link.href = bundleUrls.css;
-							document.head.appendChild( link );
+							cssPromise = new Promise( function ( resolve ) {
+								var link = document.createElement( 'link' );
+								link.rel  = 'stylesheet';
+								link.href = bundleUrls.css;
+								// Resolve on error too rather than blocking
+								// forever if the stylesheet fails to load -
+								// an unstyled widget is still better than
+								// one that never mounts at all.
+								link.onload  = resolve;
+								link.onerror = resolve;
+								document.head.appendChild( link );
+							} );
 						}
 
-						( bundleUrls.vendors ? loadScript( bundleUrls.vendors ) : Promise.resolve() )
+						var scriptsPromise = ( bundleUrls.vendors ? loadScript( bundleUrls.vendors ) : Promise.resolve() )
 							.then( function () {
 								return Promise.all( ( bundleUrls.chunks || [] ).map( loadScript ) );
 							} )
 							.then( function () {
 								return loadScript( bundleUrls.widget );
-							} )
+							} );
+
+						Promise.all( [ cssPromise, scriptsPromise ] )
 							.then( function () {
 								ready = true;
 								var pending = window.__cgptPendingInits || [];
