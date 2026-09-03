@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.12.0
+ * Version: 2.12.1
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1647,8 +1647,8 @@ final class CustomGPT_Chat_Widget_Plugin {
 							// visitor would have to click again once the
 							// real widget appears.
 							pendingSsrIntent = target.closest( '.cgpt-ssr-chip' )
-								? { type: 'chip', text: target.textContent }
-								: { type: 'input' };
+								? { type: 'chip', text: target.textContent, expires: Date.now() + 8000 }
+								: { type: 'input', expires: Date.now() + 8000 };
 							if ( window.__cgptStartWidgetLoad ) {
 								window.__cgptStartWidgetLoad();
 							}
@@ -1669,19 +1669,34 @@ final class CustomGPT_Chat_Widget_Plugin {
 						if ( ! pendingSsrIntent ) {
 							return;
 						}
+						if ( Date.now() > pendingSsrIntent.expires ) {
+							// Gave up waiting (e.g. the chip text changed
+							// between SSR render and mount, or something
+							// failed) - stop retrying on every future DOM
+							// mutation on the page.
+							pendingSsrIntent = null;
+							return;
+						}
 						var card = document.querySelector( '.customgpt-chat-embed .cgpt-hero-card' );
 						if ( ! card ) {
 							return;
 						}
-						var intent = pendingSsrIntent;
-						pendingSsrIntent = null;
-						if ( 'chip' === intent.type ) {
+						if ( 'chip' === pendingSsrIntent.type ) {
 							var buttons = card.querySelectorAll( 'button' );
 							for ( var i = 0; i < buttons.length; i++ ) {
 								if ( buttons[ i ].closest( '.cgpt-input-row' ) || buttons[ i ].closest( '.cgpt-input-wrap' ) ) {
 									continue;
 								}
-								if ( buttons[ i ].textContent.trim() === intent.text.trim() ) {
+								if ( buttons[ i ].textContent.trim() === pendingSsrIntent.text.trim() ) {
+									// Only consumed on an actual match - the
+									// hero card container can mount before
+									// its chip buttons are populated (they
+									// fill in once agent settings finish
+									// loading), so clearing this earlier
+									// would discard the visitor's click
+									// before a match ever had a chance to
+									// happen.
+									pendingSsrIntent = null;
 									buttons[ i ].click();
 									return;
 								}
@@ -1689,6 +1704,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 						} else {
 							var textarea = card.querySelector( 'textarea' );
 							if ( textarea ) {
+								pendingSsrIntent = null;
 								textarea.focus();
 							}
 						}
