@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.12.2
+ * Version: 2.12.3
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1672,6 +1672,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 							pendingSsrIntent = target.closest( '.cgpt-ssr-chip' )
 								? { type: 'chip', text: target.textContent, expires: Date.now() + 8000 }
 								: { type: 'input', expires: Date.now() + 8000 };
+							maybeStartWatchingForSsrIntent();
 							if ( window.__cgptStartWidgetLoad ) {
 								window.__cgptStartWidgetLoad();
 							}
@@ -1688,6 +1689,21 @@ final class CustomGPT_Chat_Widget_Plugin {
 					// reason); a plain click on the SSR input box just
 					// focuses the real textarea, since there's no typed
 					// text to actually submit on its behalf.
+					// Disconnected the moment its job is done (or given up on)
+					// below - left running for the rest of the page's life,
+					// this fires on EVERY DOM mutation anywhere on the page,
+					// including the very frequent ones a streaming chat
+					// response produces once a conversation is underway.
+					// Confirmed live: leaving it attached indefinitely was
+					// enough to make the tab hang after a successful click,
+					// well after this observer's actual work was finished.
+					var ssrIntentObserver = new MutationObserver( replaySsrIntent );
+
+					function stopWatchingForSsrIntent() {
+						pendingSsrIntent = null;
+						ssrIntentObserver.disconnect();
+					}
+
 					function replaySsrIntent() {
 						if ( ! pendingSsrIntent ) {
 							return;
@@ -1695,9 +1711,8 @@ final class CustomGPT_Chat_Widget_Plugin {
 						if ( Date.now() > pendingSsrIntent.expires ) {
 							// Gave up waiting (e.g. the chip text changed
 							// between SSR render and mount, or something
-							// failed) - stop retrying on every future DOM
-							// mutation on the page.
-							pendingSsrIntent = null;
+							// failed).
+							stopWatchingForSsrIntent();
 							return;
 						}
 						var card = document.querySelector( '.customgpt-chat-embed .cgpt-hero-card' );
@@ -1719,20 +1734,25 @@ final class CustomGPT_Chat_Widget_Plugin {
 									// would discard the visitor's click
 									// before a match ever had a chance to
 									// happen.
-									pendingSsrIntent = null;
-									buttons[ i ].click();
+									var matchedButton = buttons[ i ];
+									stopWatchingForSsrIntent();
+									matchedButton.click();
 									return;
 								}
 							}
 						} else {
 							var textarea = card.querySelector( 'textarea' );
 							if ( textarea ) {
-								pendingSsrIntent = null;
+								stopWatchingForSsrIntent();
 								textarea.focus();
 							}
 						}
 					}
-					new MutationObserver( replaySsrIntent ).observe( document.body, { childList: true, subtree: true } );
+					function maybeStartWatchingForSsrIntent() {
+						if ( pendingSsrIntent ) {
+							ssrIntentObserver.observe( document.body, { childList: true, subtree: true } );
+						}
+					}
 
 					// Retry-once workaround for a first-click race inside the
 					// REAL (already-mounted) widget bundle itself - distinct
