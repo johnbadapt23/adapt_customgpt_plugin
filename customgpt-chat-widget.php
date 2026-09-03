@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.12.5
+ * Version: 2.12.6
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1751,6 +1751,56 @@ final class CustomGPT_Chat_Widget_Plugin {
 						ssrIntentObserver.disconnect();
 					}
 
+					// Reproduced live: replaying the visitor's click via
+					// matchedButton.click() below can land before the real
+					// widget's own onClick handler is actually wired up -
+					// the exact same first-paint race the "Retry-once
+					// workaround" further down exists to catch for genuine
+					// user clicks on an already-mounted widget. That
+					// workaround can't be trusted to also cover this
+					// replayed click: it decides a click "worked" by
+					// checking whether cgpt-active is already present, but
+					// cgpt-active is very often already true by this point
+					// (this same click already ran the transition-overlay
+					// listener above, which adds it), so the workaround
+					// sees "already active" and never retries - the
+					// replayed click is silently swallowed and the widget
+					// is left sitting on its own (now real, mounted) hero
+					// screen indefinitely, still expanded fullscreen.
+					// Confirmed live: a chip clicked within the first
+					// second of page load can get stuck exactly like this
+					// for 60+ seconds with zero console errors and no
+					// pending network requests - nothing was ever actually
+					// broken, the click just never landed.
+					//
+					// Verifies against a real signal instead - either a
+					// message row has appeared (worked), or the hero card
+					// is gone entirely for some other reason (also fine,
+					// nothing left to click) - and retries the same click
+					// up to twice more on a short interval otherwise.
+					function clickChipWithRetry( button, text, attempt ) {
+						setTimeout( function () {
+							if ( document.querySelector( '.customgpt-chat-embed .cgpt-msg-row' ) ) {
+								return;
+							}
+							var card = document.querySelector( '.customgpt-chat-embed .cgpt-hero-card' );
+							if ( ! card || attempt >= 2 ) {
+								return;
+							}
+							var buttons = card.querySelectorAll( 'button' );
+							for ( var i = 0; i < buttons.length; i++ ) {
+								if ( buttons[ i ].closest( '.cgpt-input-row' ) || buttons[ i ].closest( '.cgpt-input-wrap' ) ) {
+									continue;
+								}
+								if ( buttons[ i ].textContent.trim() === text ) {
+									buttons[ i ].click();
+									clickChipWithRetry( buttons[ i ], text, attempt + 1 );
+									return;
+								}
+							}
+						}, 500 );
+					}
+
 					function replaySsrIntent() {
 						if ( ! pendingSsrIntent ) {
 							return;
@@ -1782,8 +1832,9 @@ final class CustomGPT_Chat_Widget_Plugin {
 									// before a match ever had a chance to
 									// happen.
 									var matchedButton = buttons[ i ];
+									var matchedText   = pendingSsrIntent.text.trim();
 									stopWatchingForSsrIntent();
-									matchedButton.click();
+									clickChipWithRetry( matchedButton, matchedText, 0 );
 									return;
 								}
 							}
