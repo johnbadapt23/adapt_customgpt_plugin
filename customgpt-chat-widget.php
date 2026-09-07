@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.12.8
+ * Version: 2.12.9
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -771,7 +771,8 @@ final class CustomGPT_Chat_Widget_Plugin {
 				.cgpt-ssr-input-placeholder{color:#838383;font-size:14px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 				.cgpt-ssr-send-btn{flex-shrink:0;width:36px;height:36px;border-radius:4px;background:#F4574F;opacity:.5;color:#fff;display:flex;align-items:center;justify-content:center;font-size:16px;line-height:1}
 				.cgpt-ssr-chips{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
-				.cgpt-ssr-chip{min-height:50px;border-radius:4px;background:#FDF1F1}
+				.cgpt-ssr-chip{min-height:50px;border-radius:4px;background:#FDF1F1;cursor:pointer;transition:background-color .15s ease}
+				.cgpt-ssr-chip:hover{background:#fbe3e3}
 				@media (min-width:640px){
 					.cgpt-ssr-card{padding:32px}
 					.cgpt-ssr-chips{gap:12px}
