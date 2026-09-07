@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.12.9
+ * Version: 2.12.10
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -843,7 +843,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 				<div class="cgpt-ssr-card">
 					<div class="cgpt-ssr-input">
 						<span class="cgpt-ssr-input-placeholder"><?php echo esc_html( $input_placeholder ); ?></span>
-						<span class="cgpt-ssr-send-btn" aria-hidden="true">&#8594;</span>
+						<span class="cgpt-ssr-send-btn" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 16 14" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M8.92807 1.7007L12.8779 6.00392L0.914461 6.00392C0.410041 6.00392 -3.01113e-07 6.45099 -2.79207e-07 7.00017C-2.57298e-07 7.54944 0.410041 7.99651 0.914461 7.99651L12.8779 7.99651L8.92807 12.2994C8.5824 12.676 8.58264 13.3325 8.92807 13.7084C9.10053 13.8964 9.3305 14 9.57469 14C9.81886 14 10.0486 13.8964 10.2213 13.7084L15.7327 7.7041C15.7538 7.68129 15.7739 7.65693 15.7929 7.63164L15.8217 7.58986C15.8301 7.57789 15.8385 7.56584 15.8461 7.55328C15.8545 7.53944 15.8621 7.52509 15.8726 7.50586L15.9311 7.38042L15.9954 7.09886C15.9985 7.06605 16 7.03315 16 7.00043C16 6.96727 15.9982 6.93395 15.9954 6.90105L15.9824 6.80706C15.9802 6.79347 15.9769 6.78014 15.9692 6.74724L15.9407 6.64855L15.8464 6.44757C15.839 6.43518 15.8304 6.42296 15.8123 6.39656L15.7927 6.3681C15.7739 6.34315 15.754 6.31897 15.7324 6.29573L10.2213 0.29181C10.0486 0.103651 9.81886 1.43701e-06 9.57469 1.44871e-06C9.3305 1.4604e-06 9.10053 0.103651 8.92807 0.29181C8.5824 0.668385 8.58264 1.32464 8.92807 1.7007Z" fill="currentColor"></path></svg></span>
 					</div>
 					<div class="cgpt-ssr-chips">
 						<?php if ( ! empty( $example_questions ) ) : ?>
