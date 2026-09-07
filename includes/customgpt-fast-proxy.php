@@ -172,8 +172,21 @@ curl_setopt_array(
 				if ( false !== stripos( $header_line, 'text/event-stream' ) ) {
 					header( 'Cache-Control: no-cache' );
 					header( 'Connection: keep-alive' );
+					// Repeated spaces compress down to almost nothing
+					// under gzip, so they never fill nginx's own gzip
+					// output buffer - confirmed live, this is why the
+					// whole SSE answer was arriving as one chunk instead
+					// of streaming, regardless of the anti-buffering
+					// settings above (those are PHP-level; nginx's gzip
+					// module is not). Random bytes compress at roughly
+					// 1:1, so 64KB of them forces an early flush under
+					// most default nginx gzip_buffers configs without
+					// needing server access. Real fix is still excluding
+					// text/event-stream from gzip_types at the nginx
+					// level - this is a best-effort mitigation for when
+					// that isn't available yet.
 					if ( ! $sse_padded ) {
-						echo ':' . str_repeat( ' ', 2048 ) . "\n\n"; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- SSE comment padding, not user data.
+						echo ':' . base64_encode( random_bytes( 65536 ) ) . "\n\n"; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- SSE comment padding, not user data.
 						flush();
 						$sse_padded = true;
 					}

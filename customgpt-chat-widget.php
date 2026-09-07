@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.12.10
+ * Version: 2.12.11
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -2465,8 +2465,29 @@ final class CustomGPT_Chat_Widget_Plugin {
 							// until a minimum byte threshold is reached.
 							// An SSE comment line (leading colon) is inert
 							// to any spec-compliant client.
+							//
+							// Confirmed live on this site: repeated spaces
+							// compress down to almost nothing under gzip, so
+							// they never actually fill nginx's own gzip
+							// output buffer - every PHP-level anti-buffering
+							// call above this can't stop nginx's OWN gzip
+							// module from holding the entire response until
+							// that buffer is full, which is exactly why the
+							// whole SSE answer was arriving as a single
+							// chunk instead of streaming, regardless of any
+							// of this proxy's own flush() calls. Random
+							// bytes compress at roughly 1:1, so pushing 64KB
+							// of them through forces at least that much
+							// through gzip's buffer immediately, which
+							// should trigger an early flush under most
+							// default nginx gzip_buffers configurations
+							// without needing server-level access. The
+							// correct real fix is still excluding
+							// text/event-stream from gzip_types at the
+							// nginx level - this is a best-effort mitigation
+							// for when that isn't available yet.
 							if ( ! $sse_padded ) {
-								echo ':' . str_repeat( ' ', 2048 ) . "\n\n"; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- SSE comment padding, not user data.
+								echo ':' . base64_encode( random_bytes( 65536 ) ) . "\n\n"; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- SSE comment padding, not user data.
 								flush();
 								$sse_padded = true;
 							}
