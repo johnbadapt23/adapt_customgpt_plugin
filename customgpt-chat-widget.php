@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.12.6
+ * Version: 2.12.8
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -762,14 +762,14 @@ final class CustomGPT_Chat_Widget_Plugin {
 				.cgpt-ssr-hero{font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;padding:40px;box-sizing:border-box}
 				.cgpt-ssr-hero *{box-sizing:border-box}
 				.cgpt-ssr-hero-inner{text-align:center}
-				.cgpt-ssr-title{font-weight:400;font-size:48px;color:#1a1a1a;margin:0 0 4px;letter-spacing:-0.01em;line-height:1.2;display:inline-block;position:relative}
+				.cgpt-ssr-title{font-weight:400;font-size:48px;color:#171717;margin:0 0 4px;letter-spacing:-1.2px;line-height:60px;display:inline-block;position:relative}
 				.cgpt-ssr-badge{position:absolute;top:0;right:0;transform:translate(15%,calc(-100% - 2px));background:#000;color:#fff;font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;padding:3px 8px;border-radius:4px;line-height:1;white-space:nowrap}
 				.cgpt-ssr-brand{color:#E7534F}
-				.cgpt-ssr-tagline{font-size:16px;color:#222;margin:0 0 24px;line-height:1.5}
-				.cgpt-ssr-card{background:#fff;border:1px solid #e5e7eb;border-radius:4px;box-shadow:0 20px 25px -5px rgba(0,0,0,.1),0 8px 10px -6px rgba(0,0,0,.1);padding:24px;text-align:left}
-				.cgpt-ssr-input{display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid #e5e7eb;border-radius:4px;padding:12px;margin-bottom:24px}
-				.cgpt-ssr-input-placeholder{color:#9ca3af;font-size:14px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-				.cgpt-ssr-send-btn{flex-shrink:0;width:36px;height:36px;border-radius:4px;background:#f3a6a3;color:#fff;display:flex;align-items:center;justify-content:center;font-size:16px;line-height:1}
+				.cgpt-ssr-tagline{font-size:16px;color:#222;margin:0 0 32px;line-height:28px}
+				.cgpt-ssr-card{background:#fff;border:1px solid #e2e8f0;border-radius:4px;box-shadow:0 20px 25px -5px rgba(0,0,0,.1),0 8px 10px -6px rgba(0,0,0,.1);padding:24px;text-align:left}
+				.cgpt-ssr-input{display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid #e2e8f0;border-radius:4px;padding:12px;margin-bottom:24px;box-shadow:0 1px 2px rgba(0,0,0,.05)}
+				.cgpt-ssr-input-placeholder{color:#838383;font-size:14px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+				.cgpt-ssr-send-btn{flex-shrink:0;width:36px;height:36px;border-radius:4px;background:#F4574F;opacity:.5;color:#fff;display:flex;align-items:center;justify-content:center;font-size:16px;line-height:1}
 				.cgpt-ssr-chips{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 				.cgpt-ssr-chip{min-height:50px;border-radius:4px;background:#FDF1F1}
 				@media (min-width:640px){
@@ -783,7 +783,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 					.cgpt-ssr-tagline{font-size:13px;margin-bottom:16px}
 					.cgpt-ssr-chips{grid-template-columns:1fr}
 				}
-				.cgpt-ssr-chip-text{display:flex;align-items:center;justify-content:flex-start;text-align:left;padding:10px 12px;font-size:13px;color:#1a1a1a;background:#FDF1F1}
+				.cgpt-ssr-chip-text{display:flex;align-items:center;justify-content:flex-start;text-align:left;padding:12px 16px;font-size:13px;line-height:24px;color:#000;background:#FDF1F1}
 				/* First-interaction loading affordance: the placeholder's
 				   chips/input have no handler of their own until the real
 				   widget bundle mounts and replaces this markup outright
