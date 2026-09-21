@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.12.11
+ * Version: 2.14.0
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -165,6 +165,13 @@ final class CustomGPT_Chat_Widget_Plugin {
 		add_action( 'wp_ajax_customgpt_proxy', array( $this, 'handle_proxy' ) );
 		add_action( 'wp_ajax_nopriv_customgpt_proxy', array( $this, 'handle_proxy' ) );
 
+		// Per-logged-in-user "messages sent" usage tracking - see
+		// record_chat_message() and the Users-list column methods below.
+		add_filter( 'manage_users_columns', array( $this, 'add_usage_column' ) );
+		add_filter( 'manage_users_custom_column', array( $this, 'render_usage_column' ), 10, 3 );
+		add_filter( 'manage_users_sortable_columns', array( $this, 'make_usage_column_sortable' ) );
+		add_action( 'pre_get_users', array( $this, 'sort_users_by_usage' ) );
+
 		add_action( 'admin_notices', array( $this, 'maybe_show_missing_dist_notice' ) );
 		add_action( 'admin_notices', array( $this, 'maybe_show_missing_credentials_notice' ) );
 
@@ -325,6 +332,15 @@ final class CustomGPT_Chat_Widget_Plugin {
 				'default'           => '1',
 			)
 		);
+		register_setting(
+			'customgpt_chat_widget_settings',
+			'customgpt_widget_external_id_mode',
+			array(
+				'type'              => 'string',
+				'sanitize_callback' => array( $this, 'sanitize_external_id_mode' ),
+				'default'           => 'none',
+			)
+		);
 
 		add_settings_section( 'customgpt_chat_widget_main', '', '__return_false', 'customgpt-chat-widget' );
 
@@ -382,6 +398,23 @@ final class CustomGPT_Chat_Widget_Plugin {
 			'customgpt-chat-widget',
 			'customgpt_chat_widget_main'
 		);
+		add_settings_field(
+			'customgpt_widget_external_id_mode',
+			'Identify Logged-In Users',
+			array( $this, 'render_external_id_mode_field' ),
+			'customgpt-chat-widget',
+			'customgpt_chat_widget_main'
+		);
+	}
+
+	/**
+	 * Only these three values are ever legitimate - anything else
+	 * (a stale/tampered POST) silently falls back to 'none' rather
+	 * than being saved as-is.
+	 */
+	public function sanitize_external_id_mode( $value ) {
+		$allowed = array( 'none', 'user_id', 'user_email' );
+		return in_array( $value, $allowed, true ) ? $value : 'none';
 	}
 
 	/**
@@ -455,6 +488,29 @@ final class CustomGPT_Chat_Widget_Plugin {
 				Not currently installed - deactivating and reactivating this plugin (or an update, since this reinstalls itself automatically) will install it.
 			<?php endif; ?>
 			Uncheck this at any time to fall back to the normal path with zero other changes - safe to toggle freely.
+		</p>
+		<?php
+	}
+
+	public function render_external_id_mode_field() {
+		$mode = get_option( 'customgpt_widget_external_id_mode', 'none' );
+		?>
+		<select name="customgpt_widget_external_id_mode">
+			<option value="none" <?php selected( $mode, 'none' ); ?>>Don't identify users</option>
+			<option value="user_id" <?php selected( $mode, 'user_id' ); ?>>WordPress User ID</option>
+			<option value="user_email" <?php selected( $mode, 'user_email' ); ?>>WordPress User Email</option>
+		</select>
+		<p class="description">
+			When a visitor is logged into WordPress, send their ID or email to CustomGPT.ai as an
+			<code>external_id</code> on each message they send, so their conversations are attributed
+			to them individually in your CustomGPT dashboard instead of showing up anonymously. This
+			also requires <strong>CRM Integration</strong> to be turned on for this agent under
+			Deploy &rarr; (deployment method) &rarr; Settings in your CustomGPT.ai dashboard - this
+			setting alone does nothing until that's enabled there too. Once both are on, per-user
+			conversation history shows up under Analytics &rarr; Reporting and Ask Me Anything &rarr;
+			Export Conversations in CustomGPT. Anonymous (not logged in) visitors are never sent an
+			external_id. Developers can override the value sent with the
+			<code>customgpt_widget_external_id</code> filter.
 		</p>
 		<?php
 	}
@@ -2297,6 +2353,117 @@ final class CustomGPT_Chat_Widget_Plugin {
 	}
 
 	/**
+	 * usermeta key holding each logged-in WordPress user's running
+	 * count of messages sent through the chat widget. Deliberately not
+	 * tracked for anonymous visitors - they have no stable WordPress
+	 * identity to attach a count to, and this site's traffic is mostly
+	 * anonymous, so a visitor-level scheme (cookie/IP-based) was ruled
+	 * out as noisy for what this is actually needed for: seeing how
+	 * much each logged-in user personally uses the widget.
+	 */
+	const USAGE_META_KEY = 'customgpt_widget_messages_sent';
+
+	/**
+	 * Increments a user's chat-usage counter by one. Called from
+	 * handle_proxy() only after a "send message" call has actually
+	 * come back with a 2xx from CustomGPT, so failed sends aren't
+	 * counted. Not called at all from the fast-path accelerator
+	 * (includes/customgpt-fast-proxy.php) - see the comment there for
+	 * why, and how it defers those requests to this normal path
+	 * instead so the count stays accurate.
+	 *
+	 * Uses a plain read-then-write rather than an atomic SQL increment;
+	 * under genuinely concurrent messages from the same user this could
+	 * in principle under-count by one, which is an acceptable trade-off
+	 * for a usage indicator rather than a billing-grade counter.
+	 */
+	private function record_chat_message( $user_id ) {
+		$user_id = (int) $user_id;
+		if ( $user_id <= 0 ) {
+			return;
+		}
+		$current = (int) get_user_meta( $user_id, self::USAGE_META_KEY, true );
+		update_user_meta( $user_id, self::USAGE_META_KEY, $current + 1 );
+	}
+
+	/**
+	 * The value sent to CustomGPT as external_id on each outgoing
+	 * "send message" call (see handle_proxy()), so conversations from
+	 * a logged-in WordPress user are attributed to that person in
+	 * CustomGPT's own dashboard (Analytics -> Reporting, Ask Me
+	 * Anything -> Export Conversations) once CRM Integration is turned
+	 * on for the agent there - see render_external_id_mode_field()'s
+	 * description. Anonymous visitors always get ''. Capped at 128
+	 * characters, matching CustomGPT's own documented limit for this
+	 * field.
+	 */
+	private function get_external_id() {
+		$external_id = '';
+
+		if ( is_user_logged_in() ) {
+			$mode         = get_option( 'customgpt_widget_external_id_mode', 'none' );
+			$current_user = wp_get_current_user();
+
+			if ( 'user_id' === $mode ) {
+				$external_id = (string) $current_user->ID;
+			} elseif ( 'user_email' === $mode ) {
+				$external_id = (string) $current_user->user_email;
+			}
+		}
+
+		// Lets a theme/plugin (or a developer's own code) supply a
+		// different identifier without touching this file, e.g.:
+		// add_filter( 'customgpt_widget_external_id', fn( $id ) => get_current_user_id() );
+		$external_id = (string) apply_filters( 'customgpt_widget_external_id', $external_id );
+
+		return substr( $external_id, 0, 128 );
+	}
+
+	/**
+	 * Adds a "CustomGPT usage" column to wp-admin -> Users.
+	 */
+	public function add_usage_column( $columns ) {
+		$columns['customgpt_usage'] = 'CustomGPT usage';
+		return $columns;
+	}
+
+	/**
+	 * Renders that column's value for a given user row.
+	 */
+	public function render_usage_column( $value, $column_name, $user_id ) {
+		if ( 'customgpt_usage' !== $column_name ) {
+			return $value;
+		}
+		$count = (int) get_user_meta( $user_id, self::USAGE_META_KEY, true );
+		return sprintf(
+			'%s %s',
+			number_format_i18n( $count ),
+			1 === $count ? 'message' : 'messages'
+		);
+	}
+
+	/**
+	 * Makes the column clickable to sort by, via sort_users_by_usage()
+	 * below.
+	 */
+	public function make_usage_column_sortable( $columns ) {
+		$columns['customgpt_usage'] = 'customgpt_usage';
+		return $columns;
+	}
+
+	/**
+	 * Handles the actual ORDER BY when an admin clicks the sortable
+	 * "CustomGPT usage" column header.
+	 */
+	public function sort_users_by_usage( $query ) {
+		if ( 'customgpt_usage' !== $query->get( 'orderby' ) ) {
+			return;
+		}
+		$query->set( 'meta_key', self::USAGE_META_KEY ); // phpcs:ignore WordPress.DB.SlowDBQuery.slow_db_query_meta_key -- small admin-only user list, not a public/high-traffic query.
+		$query->set( 'orderby', 'meta_value_num' );
+	}
+
+	/**
 	 * Server-side proxy. Forwards the widget's API calls to
 	 * app.customgpt.ai with the real API key attached, and streams the
 	 * response straight back (needed for the chat "typing" SSE stream).
@@ -2390,6 +2557,23 @@ final class CustomGPT_Chat_Widget_Plugin {
 		$method   = isset( $_SERVER['REQUEST_METHOD'] ) ? strtoupper( sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) ) : 'GET';
 		$raw_body = file_get_contents( 'php://input' );
 
+		// Per-logged-in-user usage tracking: matches only the "send
+		// message" endpoint (not conversation creation), so the count
+		// on each user's profile reflects messages sent through the
+		// chat widget. Anonymous visitors have no stable WordPress
+		// identity to attach a count to, so they're deliberately not
+		// tracked here - see record_chat_message(). The actual
+		// increment happens further down, only once the upstream call
+		// has actually succeeded (see the curl_exec() call below).
+		$is_send_message = ( 'POST' === $method ) && (bool) preg_match( '#^/projects/\d+/conversations/[^/]+/messages$#', $path );
+
+		if ( $is_send_message ) {
+			$external_id = $this->get_external_id();
+			if ( '' !== $external_id ) {
+				$url .= ( false === strpos( $url, '?' ) ? '?' : '&' ) . 'external_id=' . rawurlencode( $external_id );
+			}
+		}
+
 		$content_type = isset( $_SERVER['CONTENT_TYPE'] ) ? sanitize_text_field( wp_unslash( $_SERVER['CONTENT_TYPE'] ) ) : 'application/json';
 
 		$headers = array(
@@ -2437,8 +2621,9 @@ final class CustomGPT_Chat_Widget_Plugin {
 		header( 'X-Accel-Buffering: no' ); // Tell nginx (direct or via a CDN that honours it) not to buffer this response.
 		header( 'Cache-Control: no-cache, no-store, must-revalidate' );
 
-		$headers_sent = false;
-		$sse_padded   = false;
+		$headers_sent    = false;
+		$sse_padded      = false;
+		$response_status = 0;
 
 		$ch = curl_init( $url );
 		curl_setopt_array(
@@ -2447,9 +2632,10 @@ final class CustomGPT_Chat_Widget_Plugin {
 				CURLOPT_CUSTOMREQUEST  => $method,
 				CURLOPT_HTTPHEADER     => $headers,
 				CURLOPT_TIMEOUT        => 120,
-				CURLOPT_HEADERFUNCTION => function ( $curl_handle, $header_line ) use ( &$headers_sent, &$sse_padded ) {
+				CURLOPT_HEADERFUNCTION => function ( $curl_handle, $header_line ) use ( &$headers_sent, &$sse_padded, &$response_status ) {
 					if ( 0 === stripos( $header_line, 'HTTP/' ) && preg_match( '#HTTP/\S+\s+(\d+)#', $header_line, $m ) ) {
-						status_header( (int) $m[1] );
+						$response_status = (int) $m[1];
+						status_header( $response_status );
 					}
 
 					if ( 0 === stripos( $header_line, 'content-type:' ) ) {
@@ -2535,6 +2721,10 @@ final class CustomGPT_Chat_Widget_Plugin {
 					'details' => curl_error( $ch ),
 				)
 			);
+		}
+
+		if ( $is_send_message && $response_status >= 200 && $response_status < 300 ) {
+			$this->record_chat_message( get_current_user_id() );
 		}
 
 		curl_close( $ch );

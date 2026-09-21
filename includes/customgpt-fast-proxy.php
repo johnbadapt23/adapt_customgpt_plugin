@@ -94,6 +94,29 @@ if ( ! $is_create_conversation && ! $is_send_message ) {
 	return;
 }
 
+// Per-logged-in-user "messages sent" usage tracking (see
+// record_chat_message() in the main plugin file) needs
+// get_current_user_id(), which depends on wp_get_current_user() in
+// wp-includes/pluggable.php - not loaded yet at this mu-plugin stage
+// (mu-plugins run before pluggable.php, precisely so plugins CAN
+// override pluggable functions; see the big comment at the top of
+// this file about fatal errors from assuming too much this early).
+// Rather than hand-parse the WordPress auth cookie ourselves here -
+// exactly the kind of fragile early-bootstrap logic this file exists
+// to avoid - a "send message" request from a browser carrying a
+// logged-in-user cookie simply bails out of the fast path and falls
+// through to the normal, fully-booted handle_proxy(), where the user
+// is known safely and the count stays accurate. This site's traffic
+// is overwhelmingly anonymous visitors, who are completely unaffected
+// and keep the fast path exactly as before.
+if ( $is_send_message ) {
+	foreach ( array_keys( $_COOKIE ) as $cgpt_cookie_name ) {
+		if ( 0 === strpos( $cgpt_cookie_name, 'wordpress_logged_in_' ) ) {
+			return;
+		}
+	}
+}
+
 // From here on this is a real match. DB access (get_option) and the
 // filesystem/curl are all safe to use at this point in WordPress's own
 // bootstrap - $wpdb and the options API load well before must-use
