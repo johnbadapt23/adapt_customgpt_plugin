@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.14.3
+ * Version: 2.14.4
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1882,34 +1882,45 @@ final class CustomGPT_Chat_Widget_Plugin {
 							if ( ! card || attempt >= 2 ) {
 								return;
 							}
-							// The first click already landed and is just
-							// slow to produce content - not the same thing
-							// as the click never registering at all. This
-							// site's own measured first-response latency is
-							// commonly 18-30s (see "frozen popup" in
-							// PROJECT-HANDOFF.md), so .cgpt-msg-row alone -
-							// which only appears once content actually
-							// starts streaming back - is still false at the
-							// 500ms mark on nearly every normal send, not
-							// just the rare "handler wasn't wired up yet"
-							// race this retry exists for. Left unchecked,
-							// that meant this function reliably fired a
-							// second, genuinely real click into the
-							// already-live widget, creating a second
-							// CustomGPT conversation for a single visitor
-							// click (confirmed live: paired rows with the
-							// same query/timestamp but different generated
-							// answers in CustomGPT's own conversation
-							// export). The hero textarea going disabled
-							// happens immediately once the real onClick
-							// handler starts processing the submission,
-							// long before any content streams back, so
-							// checking it too catches "click landed, just
-							// slow" much earlier and far more reliably than
-							// waiting on .cgpt-msg-row alone.
-							var heroTextarea = card.querySelector( 'textarea' );
-							if ( heroTextarea && heroTextarea.disabled ) {
-								return;
+							// attempt === 0 is the one guaranteed-necessary
+							// click - the actual replay of the visitor's
+							// original SSR-placeholder click, which hasn't
+							// been sent yet at this point - so it must
+							// always go through regardless of textarea
+							// state. A first version of this fix checked
+							// the textarea on every attempt including this
+							// one, and that was wrong: if it happens to be
+							// disabled for some unrelated reason at the
+							// 500ms mark (most plausibly agent settings
+							// still loading, before the real chip buttons
+							// have even populated), that wrongly read as
+							// "already submitted" and swallowed the
+							// visitor's click entirely - no conversation,
+							// no response, ever. Confirmed live: this
+							// reproduced as "no response on first question
+							// after page load."
+							//
+							// attempt >= 1 means this chain has already
+							// sent one real click 500ms ago - only THEN is
+							// the textarea's disabled state trustworthy as
+							// "that click landed and is just slow to
+							// produce content" (this site's own measured
+							// first-response latency is commonly 18-30s,
+							// see "frozen popup" in PROJECT-HANDOFF.md, so
+							// .cgpt-msg-row alone - which only appears once
+							// content actually starts streaming back - is
+							// still false at the 500ms mark on nearly every
+							// normal send). Checking the textarea here is
+							// what stops that already-successful click from
+							// being resent a second time (confirmed live:
+							// paired rows with the same query/timestamp but
+							// different generated answers in CustomGPT's
+							// own conversation export).
+							if ( attempt > 0 ) {
+								var heroTextarea = card.querySelector( 'textarea' );
+								if ( heroTextarea && heroTextarea.disabled ) {
+									return;
+								}
 							}
 							var buttons = card.querySelectorAll( 'button' );
 							for ( var i = 0; i < buttons.length; i++ ) {
