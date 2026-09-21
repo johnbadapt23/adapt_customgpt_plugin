@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.14.4
+ * Version: 2.15.0
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -1336,15 +1336,42 @@ final class CustomGPT_Chat_Widget_Plugin {
 						} );
 					};
 
-					<?php if ( ! self::$lazy_load_eligible ) : ?>
-					// A non-"embedded" [customgpt_chat] instance exists on
-					// this page (e.g. "floating") - it has no SSR
-					// placeholder/hero screen to hang a "load on first
-					// interaction" trigger off of, so fall back to loading
-					// immediately here, same as this plugin always did
-					// before lazy-loading existed for the embedded hero.
-					window.__cgptStartWidgetLoad();
-					<?php endif; ?>
+					// Triggers the same widget load as a genuine
+					// chip/input click, but on the first sign of real
+					// visitor engagement (mouse movement, scroll, a key
+					// press, or a touch) instead of waiting for a
+					// deliberate click on a hero question. This keeps the
+					// original reason lazy-loading exists at all intact -
+					// a visitor who never engages with the page at all
+					// (an instant bounce, most bots) never triggers
+					// CustomGPTWidget.init() and never creates a
+					// CustomGPT conversation on the backend for nothing -
+					// while giving the widget the ENTIRE "landed on page
+					// -> started reading/scrolling" window to finish
+					// mounting, rather than only the tail end of a single
+					// click. That's what actually closes the race:
+					// pendingSsrIntent/replaySsrIntent/clickChipWithRetry
+					// above exist purely to bridge the gap between a
+					// click on the static SSR placeholder and the real,
+					// async-mounted widget - the narrower that gap, the
+					// less that bridging logic (which has already been
+					// shown to fail under real network conditions in
+					// several different ways: a duplicated conversation,
+					// a swallowed click with no response ever arriving,
+					// a hero left stuck open) is ever actually relied on.
+					// It's left in place as a fallback for the rare
+					// visitor who somehow clicks before any of these
+					// events fire, not removed.
+					//
+					// { once: true } means each listener removes itself
+					// after firing once; __cgptStartWidgetLoad() is
+					// already idempotent (early-returns once loading or
+					// ready), so it's harmless for more than one of these
+					// events to fire before the bundle finishes loading.
+					var engagementEvents = [ 'mousemove', 'scroll', 'keydown', 'touchstart', 'pointerdown' ];
+					engagementEvents.forEach( function ( evt ) {
+						document.addEventListener( evt, window.__cgptStartWidgetLoad, { passive: true, once: true } );
+					} );
 				} )();
 				</script>
 				<?php
