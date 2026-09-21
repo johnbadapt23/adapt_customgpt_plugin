@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.14.2
+ * Version: 2.14.3
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -140,6 +140,44 @@ function customgpt_widget_maybe_sync_fast_proxy() {
 	}
 }
 add_action( 'admin_init', 'customgpt_widget_maybe_sync_fast_proxy' );
+
+/**
+ * The value to send to CustomGPT.ai as external_id for the current
+ * request, so a logged-in WordPress user's conversations are
+ * attributed to them individually once CRM Integration is turned on
+ * for the agent (Settings -> CustomGPT Chat Widget -> Identify
+ * Logged-In Users controls the mode below). A standalone function
+ * rather than a class method specifically so theme code that embeds
+ * CustomGPT.ai's own chat.js directly (window.__cgptConfig +
+ * CustomGPT.init()) can call it too, instead of duplicating this
+ * logic a second time and risking it drifting out of sync with the
+ * setting on this plugin's own settings page. Only this function
+ * decides the value - CustomGPT_Chat_Widget_Plugin::get_external_id()
+ * below is a thin wrapper around it, used by this plugin's own proxy.
+ * Anonymous visitors always get ''. Capped at 128 characters, matching
+ * CustomGPT's own documented limit for this field.
+ */
+function customgpt_widget_get_external_id() {
+	$external_id = '';
+
+	if ( is_user_logged_in() ) {
+		$mode         = get_option( 'customgpt_widget_external_id_mode', 'none' );
+		$current_user = wp_get_current_user();
+
+		if ( 'user_id' === $mode ) {
+			$external_id = (string) $current_user->ID;
+		} elseif ( 'user_email' === $mode ) {
+			$external_id = (string) $current_user->user_email;
+		}
+	}
+
+	// Lets a theme/plugin (or a developer's own code) supply a
+	// different identifier without touching this file, e.g.:
+	// add_filter( 'customgpt_widget_external_id', fn( $id ) => get_current_user_id() );
+	$external_id = (string) apply_filters( 'customgpt_widget_external_id', $external_id );
+
+	return substr( $external_id, 0, 128 );
+}
 
 final class CustomGPT_Chat_Widget_Plugin {
 
@@ -2432,25 +2470,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 	 * field.
 	 */
 	private function get_external_id() {
-		$external_id = '';
-
-		if ( is_user_logged_in() ) {
-			$mode         = get_option( 'customgpt_widget_external_id_mode', 'none' );
-			$current_user = wp_get_current_user();
-
-			if ( 'user_id' === $mode ) {
-				$external_id = (string) $current_user->ID;
-			} elseif ( 'user_email' === $mode ) {
-				$external_id = (string) $current_user->user_email;
-			}
-		}
-
-		// Lets a theme/plugin (or a developer's own code) supply a
-		// different identifier without touching this file, e.g.:
-		// add_filter( 'customgpt_widget_external_id', fn( $id ) => get_current_user_id() );
-		$external_id = (string) apply_filters( 'customgpt_widget_external_id', $external_id );
-
-		return substr( $external_id, 0, 128 );
+		return customgpt_widget_get_external_id();
 	}
 
 	/**
