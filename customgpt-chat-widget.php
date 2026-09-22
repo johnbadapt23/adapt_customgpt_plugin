@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.16.0
+ * Version: 2.18.0
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -177,6 +177,44 @@ function customgpt_widget_get_external_id() {
 	$external_id = (string) apply_filters( 'customgpt_widget_external_id', $external_id );
 
 	return substr( $external_id, 0, 128 );
+}
+
+/**
+ * Whether the current visitor is allowed to see the widget at all, per
+ * the "Who Can See The Widget" setting (Settings -> CustomGPT Chat
+ * Widget). A standalone function for the same reason as
+ * customgpt_widget_get_external_id() above: theme code that embeds
+ * CustomGPT.ai's own chat.js directly, outside this plugin's own
+ * [customgpt_chat] shortcode, can call this too, instead of
+ * duplicating (and risking drifting out of sync with) the role check
+ * on this plugin's settings page. Only this function decides the
+ * value - CustomGPT_Chat_Widget_Plugin::current_user_can_see_widget()
+ * below is a thin wrapper around it, used by render_shortcode().
+ * An empty "allowed roles" setting means "visible to everyone" (see
+ * render_visible_roles_field()'s own description), not "visible to no
+ * one", so a settings mistake can't silently take the widget down
+ * site-wide with no visible explanation.
+ */
+function customgpt_widget_current_user_can_see_widget() {
+	$allowed_roles = (array) get_option( 'customgpt_widget_visible_roles', array( 'agent_tester' ) );
+
+	if ( empty( $allowed_roles ) ) {
+		return true;
+	}
+
+	if ( ! is_user_logged_in() ) {
+		return false;
+	}
+
+	$current_user = wp_get_current_user();
+
+	foreach ( $allowed_roles as $role ) {
+		if ( in_array( $role, (array) $current_user->roles, true ) ) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 final class CustomGPT_Chat_Widget_Plugin {
@@ -639,24 +677,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 	 * never placed on the page at all.
 	 */
 	private function current_user_can_see_widget() {
-		$allowed_roles = (array) get_option( 'customgpt_widget_visible_roles', array( 'agent_tester' ) );
-		if ( empty( $allowed_roles ) ) {
-			// No roles selected at all - see render_visible_roles_field()'s
-			// own description: this means "visible to everyone", not
-			// "visible to no one", so a settings mistake can't silently
-			// take the widget down site-wide with no visible explanation.
-			return true;
-		}
-		if ( ! is_user_logged_in() ) {
-			return false;
-		}
-		$current_user = wp_get_current_user();
-		foreach ( $allowed_roles as $role ) {
-			if ( in_array( $role, (array) $current_user->roles, true ) ) {
-				return true;
-			}
-		}
-		return false;
+		return customgpt_widget_current_user_can_see_widget();
 	}
 
 	public function render_show_beta_badge_field() {
@@ -959,7 +980,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 			self::$hero_placeholder_style_wired = true;
 			?>
 			<style>
-				.cgpt-ssr-hero{font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;padding:40px;box-sizing:border-box}
+				.cgpt-ssr-hero{font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;padding:40px;box-sizing:border-box}
 				.cgpt-ssr-hero *{box-sizing:border-box}
 				.cgpt-ssr-hero-inner{text-align:center}
 				.cgpt-ssr-title{font-weight:400;font-size:48px;color:#171717;margin:0 0 4px;letter-spacing:-1.2px;line-height:60px;display:inline-block;position:relative}
@@ -979,9 +1000,12 @@ final class CustomGPT_Chat_Widget_Plugin {
 				}
 				@media (max-width:639.98px){
 					.cgpt-ssr-hero{padding:24px 0 32px}
-					.cgpt-ssr-title{font-size:28px}
+					.cgpt-ssr-title{font-size:28px;line-height:33.6px;letter-spacing:-0.7px}
 					.cgpt-ssr-badge{font-size:9px;padding:2px 6px}
-					.cgpt-ssr-tagline{font-size:13px;margin-bottom:16px}
+					.cgpt-ssr-tagline{font-size:13px;margin-bottom:16px;line-height:18.85px}
+					.cgpt-ssr-card{padding:16px}
+					.cgpt-ssr-input{padding:6px}
+					.cgpt-ssr-send-btn{width:32px;height:32px}
 					.cgpt-ssr-chips{grid-template-columns:1fr}
 				}
 				.cgpt-ssr-chip-text{display:flex;align-items:center;justify-content:flex-start;text-align:left;padding:12px 16px;font-size:13px;line-height:24px;color:#000;background:#FDF1F1}
