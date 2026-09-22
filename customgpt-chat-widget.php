@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.15.0
+ * Version: 2.16.0
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -379,6 +379,15 @@ final class CustomGPT_Chat_Widget_Plugin {
 				'default'           => 'none',
 			)
 		);
+		register_setting(
+			'customgpt_chat_widget_settings',
+			'customgpt_widget_visible_roles',
+			array(
+				'type'              => 'array',
+				'sanitize_callback' => array( $this, 'sanitize_visible_roles' ),
+				'default'           => array( 'agent_tester' ),
+			)
+		);
 
 		add_settings_section( 'customgpt_chat_widget_main', '', '__return_false', 'customgpt-chat-widget' );
 
@@ -443,6 +452,32 @@ final class CustomGPT_Chat_Widget_Plugin {
 			'customgpt-chat-widget',
 			'customgpt_chat_widget_main'
 		);
+		add_settings_field(
+			'customgpt_widget_visible_roles',
+			'Who Can See The Widget',
+			array( $this, 'render_visible_roles_field' ),
+			'customgpt-chat-widget',
+			'customgpt_chat_widget_main'
+		);
+	}
+
+	/**
+	 * Accepts only role slugs (letters, digits, underscore, hyphen -
+	 * matches sanitize_key()'s own definition of a valid slug), drops
+	 * anything else silently (a stale/tampered POST, an empty string
+	 * from an unchecked box that still posted). An empty result after
+	 * sanitizing is valid and meaningful - see
+	 * current_user_can_see_widget() - so this never forces a default
+	 * back in here; only the very first, never-saved state falls back
+	 * to the register_setting() default above.
+	 */
+	public function sanitize_visible_roles( $value ) {
+		if ( ! is_array( $value ) ) {
+			return array();
+		}
+		$roles = array_map( 'sanitize_key', $value );
+		$roles = array_filter( $roles );
+		return array_values( array_unique( $roles ) );
 	}
 
 	/**
@@ -551,6 +586,77 @@ final class CustomGPT_Chat_Widget_Plugin {
 			<code>customgpt_widget_external_id</code> filter.
 		</p>
 		<?php
+	}
+
+	public function render_visible_roles_field() {
+		$selected   = (array) get_option( 'customgpt_widget_visible_roles', array( 'agent_tester' ) );
+		$role_names = function_exists( 'wp_roles' ) ? wp_roles()->get_names() : array();
+		// Always offer "agent_tester" even if it isn't (or isn't yet) a
+		// formally registered WordPress role on this site - a role only
+		// needs to appear on a user's own account to match here (see
+		// current_user_can_see_widget()), not to be registered, and
+		// it's this setting's own default, so it should always be
+		// checkable regardless.
+		if ( ! isset( $role_names['agent_tester'] ) ) {
+			$role_names = array( 'agent_tester' => 'agent_tester' ) + $role_names;
+		}
+		?>
+		<?php
+		// Ensures "customgpt_widget_visible_roles" is always present in
+		// $_POST, even with every box unchecked - the WordPress Settings
+		// API (options.php) only calls update_option() for a registered
+		// setting whose field name actually appears in the submitted
+		// form data, so without this, unchecking every box would leave
+		// the OLD saved value in place rather than actually saving an
+		// empty selection. sanitize_visible_roles() strips this blank
+		// placeholder value back out, so a real empty array is what
+		// ends up saved when nothing else is checked.
+		?>
+		<input type="hidden" name="customgpt_widget_visible_roles[]" value="" />
+		<?php foreach ( $role_names as $role_slug => $role_label ) : ?>
+			<label style="display:block;margin-bottom:4px;">
+				<input type="checkbox" name="customgpt_widget_visible_roles[]" value="<?php echo esc_attr( $role_slug ); ?>" <?php checked( in_array( $role_slug, $selected, true ) ); ?> />
+				<?php echo esc_html( translate_user_role( $role_label ) ); ?>
+			</label>
+		<?php endforeach; ?>
+		<p class="description">
+			Only WordPress users with at least one of the checked roles will see the <code>[customgpt_chat]</code>
+			widget anywhere it's placed - everyone else, including logged-out visitors, gets nothing rendered in
+			its place (no error, no placeholder). Defaults to just <strong>agent_tester</strong> so the widget
+			stays limited to testing while it's still being worked on. Leaving every box unchecked shows the
+			widget to <strong>everyone</strong>, the same as if this setting didn't exist - it never hides the
+			widget from anyone on its own.
+		</p>
+		<?php
+	}
+
+	/**
+	 * Whether the currently-logged-in visitor is allowed to see the
+	 * widget at all, per the "Who Can See The Widget" setting above.
+	 * Checked once, right at the top of render_shortcode(), before any
+	 * of the rest of that method runs - a visitor without an allowed
+	 * role gets an empty string back from the shortcode, as if it were
+	 * never placed on the page at all.
+	 */
+	private function current_user_can_see_widget() {
+		$allowed_roles = (array) get_option( 'customgpt_widget_visible_roles', array( 'agent_tester' ) );
+		if ( empty( $allowed_roles ) ) {
+			// No roles selected at all - see render_visible_roles_field()'s
+			// own description: this means "visible to everyone", not
+			// "visible to no one", so a settings mistake can't silently
+			// take the widget down site-wide with no visible explanation.
+			return true;
+		}
+		if ( ! is_user_logged_in() ) {
+			return false;
+		}
+		$current_user = wp_get_current_user();
+		foreach ( $allowed_roles as $role ) {
+			if ( in_array( $role, (array) $current_user->roles, true ) ) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	public function render_show_beta_badge_field() {
@@ -965,6 +1071,10 @@ final class CustomGPT_Chat_Widget_Plugin {
 	 *   [customgpt_chat agent_id="123"]   (override agent per-instance; the API key always stays server-side)
 	 */
 	public function render_shortcode( $atts ) {
+		if ( ! $this->current_user_can_see_widget() ) {
+			return '';
+		}
+
 		$atts = shortcode_atts(
 			array(
 				'agent_id'   => $this->get_agent_id(),
