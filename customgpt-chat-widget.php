@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.18.0
+ * Version: 2.18.1
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -223,6 +223,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 	private static $script_enqueued              = false;
 	private static $active_class_wired           = false;
 	private static $heading_patch_wired          = false;
+	private static $terms_link_patch_wired       = false;
 	private static $hero_placeholder_style_wired = false;
 	// Whether every [customgpt_chat] instance seen on this page so far
 	// is "embedded" mode. Only embedded mode has an SSR placeholder to
@@ -325,6 +326,78 @@ final class CustomGPT_Chat_Widget_Plugin {
 	}
 
 	/**
+	 * Optional manual override for the "Terms of Service" link under the
+	 * chat input. Empty by default, in which case get_terms_url() uses
+	 * the URL configured in the CustomGPT.ai dashboard instead.
+	 */
+	private function get_terms_url_override() {
+		return trim( (string) get_option( 'customgpt_widget_terms_url', '' ) );
+	}
+
+	/**
+	 * Effective Terms of Service URL for the link under the chat input:
+	 * the manual override (if set), otherwise the URL configured in the
+	 * CustomGPT.ai dashboard (read from GET /projects/{id}/settings via
+	 * fetch_agent_settings_cached()), otherwise '' - in which case the
+	 * compiled bundle's own hardcoded "/terms-of-service" link is left
+	 * untouched.
+	 */
+	private function get_terms_url() {
+		$override = $this->get_terms_url_override();
+		if ( '' !== $override ) {
+			return $override;
+		}
+		$agent_id = $this->get_agent_id();
+		if ( '' === (string) $agent_id ) {
+			return '';
+		}
+		$settings = $this->fetch_agent_settings_cached( $agent_id );
+		return ( is_array( $settings ) && ! empty( $settings['terms_url'] ) ) ? (string) $settings['terms_url'] : '';
+	}
+
+	/**
+	 * Finds the Terms of Service URL in a raw GET /projects/{id}/settings
+	 * payload. The compiled widget bundle never reads this setting (its
+	 * link is a hardcoded "/terms-of-service"), and the field is not in
+	 * the starter kit's own settings types, so rather than depend on one
+	 * exact key name this takes the first top-level key whose name
+	 * mentions terms or tos and whose value is an absolute http(s)
+	 * URL ("policy" keys are skipped so a privacy policy URL is never
+	 * picked up by mistake). The settings
+	 * page shows which key matched, so the match can be verified.
+	 *
+	 * Returns array( 'key' => ..., 'url' => ... ) or null.
+	 */
+	private function detect_terms_url_in_settings( $data ) {
+		if ( ! is_array( $data ) ) {
+			return null;
+		}
+		$best      = null;
+		$best_rank = 99;
+		foreach ( $data as $key => $value ) {
+			if ( ! is_string( $value ) || ! preg_match( '#^https?://#i', trim( $value ) ) ) {
+				continue;
+			}
+			$k = strtolower( (string) $key );
+			if ( false !== strpos( $k, 'terms' ) ) {
+				$rank = 0;
+			} elseif ( preg_match( '/(^|_)tos(_|$)/', $k ) ) {
+				$rank = 1;
+			} else {
+				continue;
+			}
+			if ( $rank < $best_rank ) {
+				$best_rank = $rank;
+				$best      = array(
+					'key' => (string) $key,
+					'url' => esc_url_raw( trim( $value ) ),
+				);
+			}
+		}
+		return ( $best && '' !== $best['url'] ) ? $best : null;
+	}
+
+	/**
 	 * Prepends a "Settings" link to this plugin's row on the Plugins
 	 * list page, pointing at Settings -> CustomGPT Chat Widget.
 	 */
@@ -401,6 +474,15 @@ final class CustomGPT_Chat_Widget_Plugin {
 		);
 		register_setting(
 			'customgpt_chat_widget_settings',
+			'customgpt_widget_terms_url',
+			array(
+				'type'              => 'string',
+				'sanitize_callback' => 'esc_url_raw',
+				'default'           => '',
+			)
+		);
+		register_setting(
+			'customgpt_chat_widget_settings',
 			'customgpt_widget_fast_proxy_enabled',
 			array(
 				'type'              => 'string',
@@ -473,6 +555,13 @@ final class CustomGPT_Chat_Widget_Plugin {
 			'customgpt_widget_heading_suffix',
 			'Heading Suffix Text',
 			array( $this, 'render_heading_suffix_field' ),
+			'customgpt-chat-widget',
+			'customgpt_chat_widget_main'
+		);
+		add_settings_field(
+			'customgpt_widget_terms_url',
+			'Terms of Service Link',
+			array( $this, 'render_terms_url_field' ),
 			'customgpt-chat-widget',
 			'customgpt_chat_widget_main'
 		);
@@ -705,6 +794,35 @@ final class CustomGPT_Chat_Widget_Plugin {
 			esc_attr( get_option( 'customgpt_widget_heading_suffix', 'Intelligence' ) )
 		);
 		echo '<p class="description">The rest of the heading, right after the brand word. Defaults to "Intelligence". Together they read, e.g., "ADAPT Intelligence".</p>';
+	}
+
+	public function render_terms_url_field() {
+		printf(
+			'<input type="url" name="customgpt_widget_terms_url" value="%s" class="regular-text" placeholder="Leave blank to use the CustomGPT.ai dashboard setting" />',
+			esc_attr( $this->get_terms_url_override() )
+		);
+		echo '<p class="description">Where the "By using this agent, you agree to our Terms of Service." link under the chat input points. Leave blank to use the URL set in your CustomGPT.ai dashboard.</p>';
+
+		$agent_id = $this->get_agent_id();
+		$settings = '' !== (string) $agent_id ? $this->fetch_agent_settings_cached( $agent_id ) : null;
+		if ( is_array( $settings ) && ! empty( $settings['terms_url'] ) ) {
+			printf(
+				'<p class="description">Detected from the CustomGPT.ai dashboard: <a href="%1$s" target="_blank" rel="noopener noreferrer">%2$s</a> (field <code>%3$s</code>).</p>',
+				esc_url( $settings['terms_url'] ),
+				esc_html( $settings['terms_url'] ),
+				esc_html( isset( $settings['terms_url_key'] ) ? $settings['terms_url_key'] : '' )
+			);
+		} elseif ( is_array( $settings ) ) {
+			echo '<p class="description">No Terms of Service URL was found in the CustomGPT.ai dashboard settings. The widget will keep its default link unless a URL is entered above.</p>';
+			if ( ! empty( $settings['url_keys'] ) ) {
+				printf(
+					'<p class="description">URL fields returned by the dashboard settings: <code>%s</code></p>',
+					esc_html( implode( ', ', $settings['url_keys'] ) )
+				);
+			}
+		} else {
+			echo '<p class="description">The CustomGPT.ai dashboard settings could not be read (check the Agent ID and API Key).</p>';
+		}
 	}
 
 	public function render_settings_page() {
@@ -942,6 +1060,19 @@ final class CustomGPT_Chat_Widget_Plugin {
 			'default_prompt'           => isset( $data['default_prompt'] ) ? (string) $data['default_prompt'] : '',
 			'try_asking_questions_msg' => isset( $data['try_asking_questions_msg'] ) ? (string) $data['try_asking_questions_msg'] : '',
 		);
+
+		$terms                     = $this->detect_terms_url_in_settings( $data );
+		$settings['terms_url']     = $terms ? $terms['url'] : '';
+		$settings['terms_url_key'] = $terms ? $terms['key'] : '';
+		// Names (never values) of every top-level field holding a URL,
+		// shown on the settings page only, to help identify the right
+		// field if detection ever misses.
+		$settings['url_keys'] = array();
+		foreach ( $data as $key => $value ) {
+			if ( is_string( $value ) && preg_match( '#^https?://#i', trim( $value ) ) ) {
+				$settings['url_keys'][] = (string) $key;
+			}
+		}
 
 		set_transient( $cache_key, $settings, 5 * MINUTE_IN_SECONDS );
 		return $settings;
@@ -1205,6 +1336,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 			$config['position']        = $atts['position'];
 			self::$lazy_load_eligible = false;
 		}
+		$this->enqueue_terms_link_patch_behavior();
 		?>
 		<script nowprocket data-no-minify="1">
 		( function () {
@@ -2236,6 +2368,70 @@ final class CustomGPT_Chat_Widget_Plugin {
 			// it - both hooks were really running at 20, in registration
 			// order, so this one was consistently losing the race.
 			1
+		);
+	}
+
+	/**
+	 * Points the widget's "By using this agent, you agree to our Terms
+	 * of Service." link at the URL from get_terms_url(). The compiled
+	 * bundle renders that link with a hardcoded href="/terms-of-service"
+	 * and never reads the dashboard setting, so this rewrites the href
+	 * once the link appears, and again if the widget re-renders it.
+	 * Not enqueued at all when no URL is configured anywhere.
+	 */
+	private function enqueue_terms_link_patch_behavior() {
+		if ( self::$terms_link_patch_wired ) {
+			return;
+		}
+		$terms_url = $this->get_terms_url();
+		if ( '' === $terms_url ) {
+			return;
+		}
+		self::$terms_link_patch_wired = true;
+
+		add_action(
+			'wp_footer',
+			function () use ( $terms_url ) {
+				?>
+				<script nowprocket data-no-minify="1">
+				( function () {
+					var CGPT_TERMS_URL = <?php echo wp_json_encode( esc_url_raw( $terms_url ) ); ?>;
+					var SELECTOR = 'a[href="/terms-of-service"]';
+
+					function patchAll( root ) {
+						if ( ! root || ! root.querySelectorAll ) {
+							return;
+						}
+						if ( root.matches && root.matches( SELECTOR ) ) {
+							root.setAttribute( 'href', CGPT_TERMS_URL );
+						}
+						var links = root.querySelectorAll( SELECTOR );
+						for ( var i = 0; i < links.length; i++ ) {
+							links[ i ].setAttribute( 'href', CGPT_TERMS_URL );
+						}
+					}
+
+					patchAll( document );
+
+					new MutationObserver( function ( mutations ) {
+						for ( var i = 0; i < mutations.length; i++ ) {
+							var m = mutations[ i ];
+							if ( 'attributes' === m.type ) {
+								patchAll( m.target );
+								continue;
+							}
+							for ( var j = 0; j < m.addedNodes.length; j++ ) {
+								if ( m.addedNodes[ j ].nodeType === 1 ) {
+									patchAll( m.addedNodes[ j ] );
+								}
+							}
+						}
+					} ).observe( document.body, { childList: true, subtree: true, attributes: true, attributeFilter: [ 'href' ] } );
+				} )();
+				</script>
+				<?php
+			},
+			20
 		);
 	}
 
