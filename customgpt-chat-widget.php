@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.18.3
+ * Version: 2.18.4
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -326,20 +326,38 @@ final class CustomGPT_Chat_Widget_Plugin {
 	}
 
 	/**
-	 * Terms of Service URL for the link under the chat input, as
-	 * configured in the CustomGPT.ai dashboard (Personalize -> Advanced
-	 * -> Terms of Service), read from GET /projects/{id}/settings via
-	 * fetch_agent_settings_cached(). '' if not found - in which case the
-	 * compiled bundle's own hardcoded "/terms-of-service" link is left
-	 * untouched.
+	 * Default for the plugin-side Terms of Service URL setting.
+	 */
+	const DEFAULT_TERMS_URL = 'https://adapt.com.au/content-usage-policy/';
+
+	/**
+	 * Plugin-side Terms of Service URL (Settings -> CustomGPT Chat
+	 * Widget -> Terms of Service URL). Used because CustomGPT.ai's
+	 * GET /projects/{id}/settings does not currently return the
+	 * dashboard's Terms of Service field (Personalize -> Advanced),
+	 * confirmed against the live response.
+	 */
+	private function get_terms_url_setting() {
+		return trim( (string) get_option( 'customgpt_widget_terms_url', self::DEFAULT_TERMS_URL ) );
+	}
+
+	/**
+	 * Effective URL for the "By using this agent, you agree to our Terms
+	 * of Service." link under the chat input. The CustomGPT.ai dashboard
+	 * value wins if the API ever starts returning it (detected
+	 * automatically via fetch_agent_settings_cached()); until then the
+	 * plugin setting above is used. '' leaves the compiled bundle's own
+	 * hardcoded "/terms-of-service" link untouched.
 	 */
 	private function get_terms_url() {
 		$agent_id = $this->get_agent_id();
-		if ( '' === (string) $agent_id ) {
-			return '';
+		if ( '' !== (string) $agent_id ) {
+			$settings = $this->fetch_agent_settings_cached( $agent_id );
+			if ( is_array( $settings ) && ! empty( $settings['terms_url'] ) ) {
+				return (string) $settings['terms_url'];
+			}
 		}
-		$settings = $this->fetch_agent_settings_cached( $agent_id );
-		return ( is_array( $settings ) && ! empty( $settings['terms_url'] ) ) ? (string) $settings['terms_url'] : '';
+		return $this->get_terms_url_setting();
 	}
 
 	/**
@@ -474,6 +492,15 @@ final class CustomGPT_Chat_Widget_Plugin {
 		);
 		register_setting(
 			'customgpt_chat_widget_settings',
+			'customgpt_widget_terms_url',
+			array(
+				'type'              => 'string',
+				'sanitize_callback' => 'esc_url_raw',
+				'default'           => self::DEFAULT_TERMS_URL,
+			)
+		);
+		register_setting(
+			'customgpt_chat_widget_settings',
 			'customgpt_widget_fast_proxy_enabled',
 			array(
 				'type'              => 'string',
@@ -551,7 +578,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 		);
 		add_settings_field(
 			'customgpt_widget_terms_url',
-			'Terms of Service Link',
+			'Terms of Service URL',
 			array( $this, 'render_terms_url_field' ),
 			'customgpt-chat-widget',
 			'customgpt_chat_widget_main'
@@ -788,31 +815,22 @@ final class CustomGPT_Chat_Widget_Plugin {
 	}
 
 	public function render_terms_url_field() {
-		echo '<p class="description">Read-only. The "By using this agent, you agree to our Terms of Service." link under the chat input uses the Terms of Service URL set in the CustomGPT.ai dashboard (Personalize &rarr; Advanced &rarr; Terms of Service).</p>';
+		printf(
+			'<input type="url" name="customgpt_widget_terms_url" value="%1$s" class="regular-text" placeholder="%2$s" />',
+			esc_attr( $this->get_terms_url_setting() ),
+			esc_attr( self::DEFAULT_TERMS_URL )
+		);
+		echo '<p class="description">Where the "By using this agent, you agree to our Terms of Service." link under the chat input points. Set here because the CustomGPT.ai API does not currently return the dashboard\'s Terms of Service setting. If it ever does, the dashboard value is used automatically instead.</p>';
 
 		$agent_id = $this->get_agent_id();
 		$settings = '' !== (string) $agent_id ? $this->fetch_agent_settings_cached( $agent_id ) : null;
 		if ( is_array( $settings ) && ! empty( $settings['terms_url'] ) ) {
 			printf(
-				'<p class="description">Detected from the CustomGPT.ai dashboard: <a href="%1$s" target="_blank" rel="noopener noreferrer">%2$s</a> (field <code>%3$s</code>).</p>',
+				'<p class="description"><strong>Currently using the CustomGPT.ai dashboard value:</strong> <a href="%1$s" target="_blank" rel="noopener noreferrer">%2$s</a> (API field <code>%3$s</code>). The URL above is ignored while this is set.</p>',
 				esc_url( $settings['terms_url'] ),
 				esc_html( $settings['terms_url'] ),
 				esc_html( isset( $settings['terms_url_key'] ) ? $settings['terms_url_key'] : '' )
 			);
-		} elseif ( is_array( $settings ) ) {
-			echo '<p class="description">No Terms of Service URL was found in the CustomGPT.ai dashboard settings. The widget will keep its default link.</p>';
-			printf(
-				'<p class="description">URL fields returned by the API: <code>%s</code></p>',
-				esc_html( ! empty( $settings['url_keys'] ) ? implode( ', ', $settings['url_keys'] ) : 'none' )
-			);
-			if ( ! empty( $settings['field_names'] ) ) {
-				printf(
-					'<p class="description">All fields returned by the API: <code>%s</code></p>',
-					esc_html( implode( ', ', $settings['field_names'] ) )
-				);
-			}
-		} else {
-			echo '<p class="description">The CustomGPT.ai dashboard settings could not be read (check the Agent ID and API Key).</p>';
 		}
 	}
 
@@ -1055,7 +1073,34 @@ final class CustomGPT_Chat_Widget_Plugin {
 			'try_asking_questions_msg' => isset( $data['try_asking_questions_msg'] ) ? (string) $data['try_asking_questions_msg'] : '',
 		);
 
-		$terms                     = $this->detect_terms_url_in_settings( $data );
+		$terms = $this->detect_terms_url_in_settings( $data );
+
+		// The settings endpoint does not currently return the dashboard's
+		// Terms of Service field, so also check the agent's own record
+		// (GET /projects/{id}) in case it is exposed there. Same short
+		// timeout; the result is cached with everything else below, so
+		// this is at most one extra request per 5 minutes site-wide.
+		if ( ! $terms ) {
+			$project_response = wp_remote_get(
+				CUSTOMGPT_API_BASE . '/projects/' . rawurlencode( (string) $agent_id ),
+				array(
+					'headers' => array(
+						'Authorization' => 'Bearer ' . $api_key,
+						'Accept'        => 'application/json',
+					),
+					'timeout' => 3,
+				)
+			);
+			if ( ! is_wp_error( $project_response ) && 200 === wp_remote_retrieve_response_code( $project_response ) ) {
+				$project_body = json_decode( wp_remote_retrieve_body( $project_response ), true );
+				$project_data = isset( $project_body['data'] ) && is_array( $project_body['data'] ) ? $project_body['data'] : $project_body;
+				$terms        = $this->detect_terms_url_in_settings( $project_data );
+				if ( $terms ) {
+					$terms['key'] = 'GET /projects/{id}: ' . $terms['key'];
+				}
+			}
+		}
+
 		$settings['terms_url']     = $terms ? $terms['url'] : '';
 		$settings['terms_url_key'] = $terms ? $terms['key'] : '';
 		// Field names only (never values), shown on the settings page to
