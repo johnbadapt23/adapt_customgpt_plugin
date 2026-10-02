@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.18.1
+ * Version: 2.18.2
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -326,27 +326,14 @@ final class CustomGPT_Chat_Widget_Plugin {
 	}
 
 	/**
-	 * Optional manual override for the "Terms of Service" link under the
-	 * chat input. Empty by default, in which case get_terms_url() uses
-	 * the URL configured in the CustomGPT.ai dashboard instead.
-	 */
-	private function get_terms_url_override() {
-		return trim( (string) get_option( 'customgpt_widget_terms_url', '' ) );
-	}
-
-	/**
-	 * Effective Terms of Service URL for the link under the chat input:
-	 * the manual override (if set), otherwise the URL configured in the
-	 * CustomGPT.ai dashboard (read from GET /projects/{id}/settings via
-	 * fetch_agent_settings_cached()), otherwise '' - in which case the
+	 * Terms of Service URL for the link under the chat input, as
+	 * configured in the CustomGPT.ai dashboard (Personalize -> Advanced
+	 * -> Terms of Service), read from GET /projects/{id}/settings via
+	 * fetch_agent_settings_cached(). '' if not found - in which case the
 	 * compiled bundle's own hardcoded "/terms-of-service" link is left
 	 * untouched.
 	 */
 	private function get_terms_url() {
-		$override = $this->get_terms_url_override();
-		if ( '' !== $override ) {
-			return $override;
-		}
 		$agent_id = $this->get_agent_id();
 		if ( '' === (string) $agent_id ) {
 			return '';
@@ -470,15 +457,6 @@ final class CustomGPT_Chat_Widget_Plugin {
 				'type'              => 'string',
 				'sanitize_callback' => 'sanitize_text_field',
 				'default'           => 'Intelligence',
-			)
-		);
-		register_setting(
-			'customgpt_chat_widget_settings',
-			'customgpt_widget_terms_url',
-			array(
-				'type'              => 'string',
-				'sanitize_callback' => 'esc_url_raw',
-				'default'           => '',
 			)
 		);
 		register_setting(
@@ -797,11 +775,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 	}
 
 	public function render_terms_url_field() {
-		printf(
-			'<input type="url" name="customgpt_widget_terms_url" value="%s" class="regular-text" placeholder="Leave blank to use the CustomGPT.ai dashboard setting" />',
-			esc_attr( $this->get_terms_url_override() )
-		);
-		echo '<p class="description">Where the "By using this agent, you agree to our Terms of Service." link under the chat input points. Leave blank to use the URL set in your CustomGPT.ai dashboard.</p>';
+		echo '<p class="description">Read-only. The "By using this agent, you agree to our Terms of Service." link under the chat input uses the Terms of Service URL set in the CustomGPT.ai dashboard (Personalize &rarr; Advanced &rarr; Terms of Service).</p>';
 
 		$agent_id = $this->get_agent_id();
 		$settings = '' !== (string) $agent_id ? $this->fetch_agent_settings_cached( $agent_id ) : null;
@@ -813,7 +787,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 				esc_html( isset( $settings['terms_url_key'] ) ? $settings['terms_url_key'] : '' )
 			);
 		} elseif ( is_array( $settings ) ) {
-			echo '<p class="description">No Terms of Service URL was found in the CustomGPT.ai dashboard settings. The widget will keep its default link unless a URL is entered above.</p>';
+			echo '<p class="description">No Terms of Service URL was found in the CustomGPT.ai dashboard settings. The widget will keep its default link.</p>';
 			if ( ! empty( $settings['url_keys'] ) ) {
 				printf(
 					'<p class="description">URL fields returned by the dashboard settings: <code>%s</code></p>',
