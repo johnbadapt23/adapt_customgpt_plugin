@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.18.2
+ * Version: 2.18.3
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -343,45 +343,58 @@ final class CustomGPT_Chat_Widget_Plugin {
 	}
 
 	/**
-	 * Finds the Terms of Service URL in a raw GET /projects/{id}/settings
-	 * payload. The compiled widget bundle never reads this setting (its
-	 * link is a hardcoded "/terms-of-service"), and the field is not in
-	 * the starter kit's own settings types, so rather than depend on one
-	 * exact key name this takes the first top-level key whose name
-	 * mentions terms or tos and whose value is an absolute http(s)
-	 * URL ("policy" keys are skipped so a privacy policy URL is never
-	 * picked up by mistake). The settings
-	 * page shows which key matched, so the match can be verified.
+	 * Collects every http(s) URL anywhere in a GET /projects/{id}/settings
+	 * payload (nested arrays included), keyed by its dotted field path,
+	 * e.g. array( 'terms_of_service' => 'https://...' ).
+	 */
+	private function collect_settings_urls( $data, $prefix = '', $depth = 0 ) {
+		$found = array();
+		if ( ! is_array( $data ) || $depth > 5 ) {
+			return $found;
+		}
+		foreach ( $data as $key => $value ) {
+			$path = '' === $prefix ? (string) $key : $prefix . '.' . $key;
+			if ( is_array( $value ) ) {
+				$found = array_merge( $found, $this->collect_settings_urls( $value, $path, $depth + 1 ) );
+			} elseif ( is_string( $value ) && preg_match( '#^https?://#i', trim( $value ) ) ) {
+				$found[ $path ] = trim( $value );
+			}
+		}
+		return $found;
+	}
+
+	/**
+	 * Finds the Terms of Service URL (dashboard: Personalize -> Advanced
+	 * -> Terms of Service) in a raw GET /projects/{id}/settings payload.
+	 * The field is not in CustomGPT.ai's published API reference, so
+	 * rather than depend on one exact key name this takes the first URL
+	 * whose field path mentions "terms" or "tos" ("policy" paths are
+	 * skipped so a privacy policy URL is never picked up by mistake).
+	 * The settings page shows which field matched, so it can be verified.
 	 *
 	 * Returns array( 'key' => ..., 'url' => ... ) or null.
 	 */
 	private function detect_terms_url_in_settings( $data ) {
-		if ( ! is_array( $data ) ) {
-			return null;
-		}
 		$best      = null;
 		$best_rank = 99;
-		foreach ( $data as $key => $value ) {
-			if ( ! is_string( $value ) || ! preg_match( '#^https?://#i', trim( $value ) ) ) {
-				continue;
-			}
-			$k = strtolower( (string) $key );
+		foreach ( $this->collect_settings_urls( $data ) as $path => $url ) {
+			$k = strtolower( $path );
 			if ( false !== strpos( $k, 'terms' ) ) {
 				$rank = 0;
-			} elseif ( preg_match( '/(^|_)tos(_|$)/', $k ) ) {
+			} elseif ( preg_match( '/(^|[_.])tos([_.]|$)/', $k ) ) {
 				$rank = 1;
 			} else {
 				continue;
 			}
-			if ( $rank < $best_rank ) {
+			if ( $rank < $best_rank && '' !== esc_url_raw( $url ) ) {
 				$best_rank = $rank;
 				$best      = array(
-					'key' => (string) $key,
-					'url' => esc_url_raw( trim( $value ) ),
+					'key' => $path,
+					'url' => esc_url_raw( $url ),
 				);
 			}
 		}
-		return ( $best && '' !== $best['url'] ) ? $best : null;
+		return $best;
 	}
 
 	/**
@@ -788,10 +801,14 @@ final class CustomGPT_Chat_Widget_Plugin {
 			);
 		} elseif ( is_array( $settings ) ) {
 			echo '<p class="description">No Terms of Service URL was found in the CustomGPT.ai dashboard settings. The widget will keep its default link.</p>';
-			if ( ! empty( $settings['url_keys'] ) ) {
+			printf(
+				'<p class="description">URL fields returned by the API: <code>%s</code></p>',
+				esc_html( ! empty( $settings['url_keys'] ) ? implode( ', ', $settings['url_keys'] ) : 'none' )
+			);
+			if ( ! empty( $settings['field_names'] ) ) {
 				printf(
-					'<p class="description">URL fields returned by the dashboard settings: <code>%s</code></p>',
-					esc_html( implode( ', ', $settings['url_keys'] ) )
+					'<p class="description">All fields returned by the API: <code>%s</code></p>',
+					esc_html( implode( ', ', $settings['field_names'] ) )
 				);
 			}
 		} else {
@@ -975,7 +992,10 @@ final class CustomGPT_Chat_Widget_Plugin {
 	 * hardcoded copy, same as before this existed.
 	 */
 	private function fetch_agent_settings_cached( $agent_id ) {
-		$cache_key = 'customgpt_widget_settings_' . $agent_id;
+		// "v2": cached copies written before the Terms of Service lookup
+		// existed lack its fields, so they are ignored rather than served
+		// for up to 5 more minutes after an update.
+		$cache_key = 'customgpt_widget_settings_v2_' . $agent_id;
 		$cached    = get_transient( $cache_key );
 		if ( false !== $cached ) {
 			return $cached ? $cached : null;
@@ -1038,15 +1058,10 @@ final class CustomGPT_Chat_Widget_Plugin {
 		$terms                     = $this->detect_terms_url_in_settings( $data );
 		$settings['terms_url']     = $terms ? $terms['url'] : '';
 		$settings['terms_url_key'] = $terms ? $terms['key'] : '';
-		// Names (never values) of every top-level field holding a URL,
-		// shown on the settings page only, to help identify the right
-		// field if detection ever misses.
-		$settings['url_keys'] = array();
-		foreach ( $data as $key => $value ) {
-			if ( is_string( $value ) && preg_match( '#^https?://#i', trim( $value ) ) ) {
-				$settings['url_keys'][] = (string) $key;
-			}
-		}
+		// Field names only (never values), shown on the settings page to
+		// help identify the right field if detection ever misses.
+		$settings['url_keys']    = array_keys( $this->collect_settings_urls( $data ) );
+		$settings['field_names'] = array_map( 'strval', array_keys( $data ) );
 
 		set_transient( $cache_key, $settings, 5 * MINUTE_IN_SECONDS );
 		return $settings;
