@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.19.1
+ * Version: 2.19.2
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -2563,21 +2563,31 @@ final class CustomGPT_Chat_Widget_Plugin {
 									return Promise.resolve();
 								}
 
+								// Optimistic update first, same as the widget's
+								// own (broken) stock behavior intended.
+								state.addMessage( conversationKey, Object.assign( {}, original, { feedback: feedback } ) );
+
+								var reaction = 'like' === feedback ? 2 : 1;
+
 								// message.id (the messageId argument) is this
-								// bundle's own LOCAL id, e.g. "16011214-assistant"
-								// for a finished message or an arbitrary
-								// client-generated string while still streaming
-								// - never something CustomGPT's API would
-								// recognize. The real numeric prompt id lives at
-								// message.details.prompt_id once the message is
-								// finalized (confirmed by reading how this same
-								// bundle builds that field in every code path
-								// that constructs a message), with a same-pattern
-								// fallback (leading digits before the first "-")
-								// for older objects that predate that field -
-								// mirrors exactly what the bundle's own (broken)
-								// resolution logic already did before it hit the
-								// missing API method.
+								// bundle's own LOCAL id - e.g. an arbitrary
+								// client-generated string while a reply is still
+								// streaming, "{id}-assistant" for one loaded from
+								// history - never something CustomGPT's API
+								// would recognize as a prompt id. The bundle's
+								// own (otherwise broken) resolution logic reads
+								// message.details.prompt_id for this, which looks
+								// right from the bundle's own message-construction
+								// code, but testing live against this build shows
+								// details is left empty on a message that just
+								// finished streaming in the CURRENT session - so
+								// that fast path is tried first (no extra request)
+								// and, when it comes up empty, this falls back to
+								// asking CustomGPT directly for this conversation's
+								// real message list and matching our local message
+								// by its text, which is always accurate since it
+								// comes straight from the API rather than this
+								// bundle's own (incompletely populated) local state.
 								var promptId;
 								if ( original.details && original.details.prompt_id ) {
 									promptId = original.details.prompt_id;
@@ -2587,25 +2597,74 @@ final class CustomGPT_Chat_Widget_Plugin {
 										promptId = parseInt( idMatch[ 1 ], 10 );
 									}
 								}
-								if ( ! promptId ) {
-									return Promise.resolve();
-								}
 
-								// Optimistic update first, same as the widget's
-								// own (broken) stock behavior intended.
-								state.addMessage( conversationKey, Object.assign( {}, original, { feedback: feedback } ) );
+								var sendFeedback = function ( resolvedPromptId ) {
+									var url = apiBaseUrl + '/projects/' + agentId + '/prompts/' + resolvedPromptId + '/message-response-feedback';
+									return fetch( url, {
+										method: 'PUT',
+										headers: { 'Content-Type': 'application/json' },
+										body: JSON.stringify( { reaction: reaction } ),
+									} ).then( function ( response ) {
+										if ( ! response.ok ) {
+											throw new Error( 'CustomGPT feedback request failed: ' + response.status );
+										}
+									} );
+								};
 
-								var reaction = 'like' === feedback ? 2 : 1;
-								var url = apiBaseUrl + '/projects/' + agentId + '/prompts/' + promptId + '/message-response-feedback';
-
-								return fetch( url, {
-									method: 'PUT',
-									headers: { 'Content-Type': 'application/json' },
-									body: JSON.stringify( { reaction: reaction } ),
-								} ).then( function ( response ) {
-									if ( ! response.ok ) {
-										throw new Error( 'CustomGPT feedback request failed: ' + response.status );
+								var lookupPromptId = function () {
+									if ( promptId ) {
+										return Promise.resolve( promptId );
 									}
+									if ( ! currentConversation.session_id ) {
+										return Promise.resolve( null );
+									}
+									var listUrl = apiBaseUrl + '/projects/' + agentId + '/conversations/' + currentConversation.session_id + '/messages';
+									return fetch( listUrl ).then( function ( response ) {
+										return response.ok ? response.json() : null;
+									} ).then( function ( body ) {
+										if ( ! body ) {
+											return null;
+										}
+										var list = [];
+										if ( body.data && body.data.messages && Array.isArray( body.data.messages.data ) ) {
+											list = body.data.messages.data;
+										} else if ( Array.isArray( body.data ) ) {
+											list = body.data;
+										} else if ( Array.isArray( body ) ) {
+											list = body;
+										} else if ( body.data && Array.isArray( body.data.data ) ) {
+											list = body.data.data;
+										}
+										var replies = list.filter( function ( item ) {
+											return item && item.openai_response;
+										} );
+										var match = null;
+										for ( var i = 0; i < replies.length; i++ ) {
+											if ( replies[ i ].openai_response === original.content ) {
+												match = replies[ i ];
+												break;
+											}
+										}
+										if ( ! match && replies.length > 0 ) {
+											// No exact text match (formatting drift,
+											// truncation, etc.) - the message this
+											// button is attached to is, in every
+											// layout this bundle uses feedback for,
+											// the most recent reply in the
+											// conversation, so that's still correct.
+											match = replies[ replies.length - 1 ];
+										}
+										return match ? match.id : null;
+									} ).catch( function () {
+										return null;
+									} );
+								};
+
+								return lookupPromptId().then( function ( resolvedPromptId ) {
+									if ( ! resolvedPromptId ) {
+										throw new Error( 'Could not determine CustomGPT prompt id for feedback' );
+									}
+									return sendFeedback( resolvedPromptId );
 								} ).catch( function () {
 									// Revert the optimistic update on failure.
 									state.addMessage( conversationKey, original );
