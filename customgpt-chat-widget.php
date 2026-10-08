@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.18.4
+ * Version: 2.19.0
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -224,6 +224,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 	private static $active_class_wired           = false;
 	private static $heading_patch_wired          = false;
 	private static $terms_link_patch_wired       = false;
+	private static $feedback_patch_wired         = false;
 	private static $hero_placeholder_style_wired = false;
 	// Whether every [customgpt_chat] instance seen on this page so far
 	// is "embedded" mode. Only embedded mode has an SSR placeholder to
@@ -1371,6 +1372,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 			self::$lazy_load_eligible = false;
 		}
 		$this->enqueue_terms_link_patch_behavior();
+		$this->enqueue_feedback_patch_behavior();
 		?>
 		<script nowprocket data-no-minify="1">
 		( function () {
@@ -2461,6 +2463,151 @@ final class CustomGPT_Chat_Widget_Plugin {
 							}
 						}
 					} ).observe( document.body, { childList: true, subtree: true, attributes: true, attributeFilter: [ 'href' ] } );
+				} )();
+				</script>
+				<?php
+			},
+			20
+		);
+	}
+
+	/**
+	 * Works around a bug in the compiled widget bundle itself
+	 * (dist/widget/customgpt-widget.b16.min.js): the "thumbs up/thumbs
+	 * down" feedback UI is fully present - clicking it shows a "Thanks
+	 * for your feedback!" toast - but the underlying API client this
+	 * build ships with has no updateMessageFeedback() method at all, so
+	 * the call throws before a single network request is ever made.
+	 * Confirmed by grepping the bundle: it reads response_feedback.reaction
+	 * back from the API (to show previously-saved feedback when a
+	 * conversation reloads) but never sends one. CustomGPT's own
+	 * officially-hosted chat.js (a separate, newer build we don't
+	 * control, used by the floating widget elsewhere on this site) does
+	 * have this method and does send the request - confirmed live via
+	 * the browser's Network tab: PUT
+	 * /projects/{id}/prompts/{promptId}/message-response-feedback with
+	 * body {reaction: 2} for a "like".
+	 *
+	 * There's no way to patch the missing method inside the minified
+	 * bundle itself from here, but the bundle conveniently exposes its
+	 * internal Zustand stores on window.__customgpt_widget_stores (used
+	 * for its own debug tooling), including the exact
+	 * updateMessageFeedback() store action that's failing. This replaces
+	 * that one action with a working implementation that performs the
+	 * same optimistic local UI update the original intended, then sends
+	 * the real request through this plugin's own proxy (so the API key
+	 * never has to be exposed in the browser) instead of through the
+	 * missing SDK method.
+	 *
+	 * reaction: 2 for "like" is confirmed from the live capture above;
+	 * 1 for "dislike" is inferred (CustomGPT's API wasn't captured for
+	 * that click) - worth confirming once this ships by trying a thumbs
+	 * down and checking it shows up correctly in the CustomGPT dashboard.
+	 */
+	private function enqueue_feedback_patch_behavior() {
+		if ( self::$feedback_patch_wired ) {
+			return;
+		}
+		self::$feedback_patch_wired = true;
+
+		add_action(
+			'wp_footer',
+			function () {
+				?>
+				<script nowprocket data-no-minify="1">
+				( function () {
+					var patchedSessions = {};
+
+					function patchSession( sessionId ) {
+						if ( patchedSessions[ sessionId ] ) {
+							return;
+						}
+						var stores = window.__customgpt_widget_stores;
+						var instances = window.__customgpt_widget_instances;
+						if ( ! stores || ! stores[ sessionId ] || ! stores[ sessionId ].messageStore || ! stores[ sessionId ].conversationStore ) {
+							return;
+						}
+						if ( ! instances || ! instances[ sessionId ] || ! instances[ sessionId ].config ) {
+							return;
+						}
+
+						var apiBaseUrl = instances[ sessionId ].config.apiBaseUrl;
+						var agentId    = instances[ sessionId ].config.agentId;
+						if ( ! apiBaseUrl || ! agentId ) {
+							return;
+						}
+
+						patchedSessions[ sessionId ] = true;
+
+						var messageStore      = stores[ sessionId ].messageStore;
+						var conversationStore = stores[ sessionId ].conversationStore;
+
+						messageStore.setState( {
+							updateMessageFeedback: function ( messageId, feedback ) {
+								var state               = messageStore.getState();
+								var currentConversation = conversationStore.getState().currentConversation;
+								if ( ! currentConversation ) {
+									return Promise.resolve();
+								}
+
+								var conversationKey = currentConversation.id.toString();
+								var messages         = state.messages.get( conversationKey ) || [];
+								var original          = null;
+								for ( var i = 0; i < messages.length; i++ ) {
+									if ( messages[ i ].id === messageId ) {
+										original = messages[ i ];
+										break;
+									}
+								}
+								if ( ! original ) {
+									return Promise.resolve();
+								}
+
+								// Optimistic update first, same as the widget's
+								// own (broken) stock behavior intended.
+								state.addMessage( conversationKey, Object.assign( {}, original, { feedback: feedback } ) );
+
+								var reaction = 'like' === feedback ? 2 : 1;
+								var url = apiBaseUrl + '/projects/' + agentId + '/prompts/' + messageId + '/message-response-feedback';
+
+								return fetch( url, {
+									method: 'PUT',
+									headers: { 'Content-Type': 'application/json' },
+									body: JSON.stringify( { reaction: reaction } ),
+								} ).then( function ( response ) {
+									if ( ! response.ok ) {
+										throw new Error( 'CustomGPT feedback request failed: ' + response.status );
+									}
+								} ).catch( function () {
+									// Revert the optimistic update on failure.
+									state.addMessage( conversationKey, original );
+								} );
+							},
+						} );
+					}
+
+					function scan() {
+						var instances = window.__customgpt_widget_instances;
+						if ( ! instances ) {
+							return;
+						}
+						for ( var sessionId in instances ) {
+							if ( Object.prototype.hasOwnProperty.call( instances, sessionId ) ) {
+								patchSession( sessionId );
+							}
+						}
+					}
+
+					// Poll instead of a one-shot check: window.__customgpt_widget_instances
+					// only exists once CustomGPTWidget.init() actually runs,
+					// which - per this plugin's own lazy-load/engagement-
+					// trigger behavior above - can happen anywhere from
+					// immediately to whenever the visitor first interacts
+					// with the page.
+					var scanInterval = setInterval( scan, 500 );
+					setTimeout( function () {
+						clearInterval( scanInterval );
+					}, 120000 );
 				} )();
 				</script>
 				<?php
