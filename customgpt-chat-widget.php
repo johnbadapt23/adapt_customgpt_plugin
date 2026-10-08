@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.19.0
+ * Version: 2.19.1
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -2563,12 +2563,40 @@ final class CustomGPT_Chat_Widget_Plugin {
 									return Promise.resolve();
 								}
 
+								// message.id (the messageId argument) is this
+								// bundle's own LOCAL id, e.g. "16011214-assistant"
+								// for a finished message or an arbitrary
+								// client-generated string while still streaming
+								// - never something CustomGPT's API would
+								// recognize. The real numeric prompt id lives at
+								// message.details.prompt_id once the message is
+								// finalized (confirmed by reading how this same
+								// bundle builds that field in every code path
+								// that constructs a message), with a same-pattern
+								// fallback (leading digits before the first "-")
+								// for older objects that predate that field -
+								// mirrors exactly what the bundle's own (broken)
+								// resolution logic already did before it hit the
+								// missing API method.
+								var promptId;
+								if ( original.details && original.details.prompt_id ) {
+									promptId = original.details.prompt_id;
+								} else {
+									var idMatch = String( original.id ).match( /^(\d+)-/ );
+									if ( idMatch ) {
+										promptId = parseInt( idMatch[ 1 ], 10 );
+									}
+								}
+								if ( ! promptId ) {
+									return Promise.resolve();
+								}
+
 								// Optimistic update first, same as the widget's
 								// own (broken) stock behavior intended.
 								state.addMessage( conversationKey, Object.assign( {}, original, { feedback: feedback } ) );
 
 								var reaction = 'like' === feedback ? 2 : 1;
-								var url = apiBaseUrl + '/projects/' + agentId + '/prompts/' + messageId + '/message-response-feedback';
+								var url = apiBaseUrl + '/projects/' + agentId + '/prompts/' + promptId + '/message-response-feedback';
 
 								return fetch( url, {
 									method: 'PUT',
