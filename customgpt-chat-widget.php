@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.19.2
+ * Version: 2.19.3
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -2567,7 +2567,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 								// own (broken) stock behavior intended.
 								state.addMessage( conversationKey, Object.assign( {}, original, { feedback: feedback } ) );
 
-								var reaction = 'like' === feedback ? 2 : 1;
+								var reaction = 'like' === feedback ? 'liked' : 'disliked';
 
 								// message.id (the messageId argument) is this
 								// bundle's own LOCAL id - e.g. an arbitrary
@@ -2599,7 +2599,18 @@ final class CustomGPT_Chat_Widget_Plugin {
 								}
 
 								var sendFeedback = function ( resolvedPromptId ) {
-									var url = apiBaseUrl + '/projects/' + agentId + '/prompts/' + resolvedPromptId + '/message-response-feedback';
+									// Documented, API-key-authenticated endpoint
+									// (from CustomGPT's own starter-kit OpenAPI spec,
+									// openapi-new.json) - PUT .../conversations/{sessionId}/messages/{promptId}/feedback,
+									// body {reaction: "liked"|"disliked"|"neutral"}.
+									// NOT the same path the floating widget's own
+									// (differently-authenticated, likely dashboard-
+									// session-only) PUT .../prompts/{promptId}/message-response-feedback
+									// call used - that one isn't part of the
+									// documented, API-key-authenticated surface; it
+									// exists under /api/v1/ too, but read-only there
+									// (confirmed live: "Supported methods: GET, HEAD").
+									var url = apiBaseUrl + '/projects/' + agentId + '/conversations/' + currentConversation.session_id + '/messages/' + resolvedPromptId + '/feedback';
 									return fetch( url, {
 										method: 'PUT',
 										headers: { 'Content-Type': 'application/json' },
