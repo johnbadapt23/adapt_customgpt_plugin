@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.19.4
+ * Version: 2.19.5
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -2750,26 +2750,65 @@ final class CustomGPT_Chat_Widget_Plugin {
 					.customgpt-widget-wrapper div[class*="group-hover:opacity-100"] {
 						opacity: 1 !important;
 						background: #FDF1F1;
-						border-radius: 6px;
-						padding: 4px 10px !important;
-						gap: 6px !important;
-						margin-top: 8px !important;
+						border: 1px solid #F3C9C9;
+						border-radius: 8px;
+						padding: 6px 10px !important;
+						gap: 8px !important;
+						margin-top: 10px !important;
 					}
 					.customgpt-widget-wrapper div[class*="group-hover:opacity-100"]::before {
 						content: "Was this helpful?";
-						font-size: 12px;
-						font-weight: 600;
+						font-size: 13px;
+						font-weight: 700;
 						color: #171717;
-						margin-right: 2px;
+						margin-right: 4px;
 						white-space: nowrap;
 					}
+					/*
+					 * White circular chips with a visible border, instead of the
+					 * plain grey-on-pink glyphs this started as - confirmed via
+					 * live getComputedStyle() testing that the flat grey icons
+					 * (muted-foreground colour on the #FDF1F1 chip background)
+					 * had too little contrast to read as clickable controls at
+					 * a glance, which was the user's original complaint even
+					 * after the row itself was made permanently visible.
+					 */
 					.customgpt-widget-wrapper div[class*="group-hover:opacity-100"] button {
-						width: 34px !important;
-						height: 34px !important;
+						width: 36px !important;
+						height: 36px !important;
+						border-radius: 999px !important;
+						background: #ffffff !important;
+						border: 1px solid #E5B8B8 !important;
+						color: #171717 !important;
 					}
 					.customgpt-widget-wrapper div[class*="group-hover:opacity-100"] button svg {
-						width: 18px !important;
-						height: 18px !important;
+						width: 20px !important;
+						height: 20px !important;
+					}
+					/*
+					 * Live-tested widget markup uses a title attribute for
+					 * these three buttons ("Copy message" / "Good response" /
+					 * "Bad response"), not aria-label - both selectors are kept
+					 * so this still applies if a future widget build switches
+					 * back to aria-label.
+					 */
+					.customgpt-widget-wrapper div[class*="group-hover:opacity-100"] button[title="Good response"]:hover,
+					.customgpt-widget-wrapper div[class*="group-hover:opacity-100"] button[aria-label="Good response"]:hover {
+						background: #1A7F37 !important;
+						border-color: #1A7F37 !important;
+						color: #ffffff !important;
+					}
+					.customgpt-widget-wrapper div[class*="group-hover:opacity-100"] button[title="Bad response"]:hover,
+					.customgpt-widget-wrapper div[class*="group-hover:opacity-100"] button[aria-label="Bad response"]:hover {
+						background: #C4302B !important;
+						border-color: #C4302B !important;
+						color: #ffffff !important;
+					}
+					.customgpt-widget-wrapper div[class*="group-hover:opacity-100"] button[title="Copy message"]:hover,
+					.customgpt-widget-wrapper div[class*="group-hover:opacity-100"] button[aria-label="Copy message"]:hover {
+						background: #171717 !important;
+						border-color: #171717 !important;
+						color: #ffffff !important;
 					}
 					@media (max-width: 639.98px) {
 						.customgpt-widget-wrapper div[class*="group-hover:opacity-100"] {
