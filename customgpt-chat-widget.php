@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.19.3
+ * Version: 2.19.4
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -225,6 +225,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 	private static $heading_patch_wired          = false;
 	private static $terms_link_patch_wired       = false;
 	private static $feedback_patch_wired         = false;
+	private static $feedback_visibility_wired    = false;
 	private static $hero_placeholder_style_wired = false;
 	// Whether every [customgpt_chat] instance seen on this page so far
 	// is "embedded" mode. Only embedded mode has an SSR placeholder to
@@ -1373,6 +1374,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 		}
 		$this->enqueue_terms_link_patch_behavior();
 		$this->enqueue_feedback_patch_behavior();
+		$this->enqueue_feedback_visibility_style();
 		?>
 		<script nowprocket data-no-minify="1">
 		( function () {
@@ -2708,6 +2710,73 @@ final class CustomGPT_Chat_Widget_Plugin {
 					}, 120000 );
 				} )();
 				</script>
+				<?php
+			},
+			20
+		);
+	}
+
+	/**
+	 * The real widget's own per-message action row (copy / thumbs up /
+	 * thumbs down) is invisible by default and only fades in on hover
+	 * of the whole message (Tailwind's "opacity-0 group-hover:opacity-100"),
+	 * baked into the compiled JS bundle as literal classNames - there's
+	 * no dedicated class to hang a display:none-style override off of,
+	 * but that exact Tailwind utility combination is distinctive enough
+	 * to target safely with an attribute-substring selector, the same
+	 * approach already used for the BETA badge above.
+	 *
+	 * Reported by a site admin as too easy to miss entirely (no hover on
+	 * touch devices at all, and easy to overlook even with a mouse) -
+	 * this makes the row always visible, gives it a light background so
+	 * it reads as its own control rather than blending into body text,
+	 * enlarges the icons, and labels it so its purpose is obvious at a
+	 * glance. The label is pure CSS (a ::before on the row, not a real
+	 * DOM node), so there's no risk of it being removed or erroring out
+	 * when React re-renders this row - the same reason the BETA badge
+	 * override above uses CSS rather than a DOM patch.
+	 */
+	private function enqueue_feedback_visibility_style() {
+		if ( self::$feedback_visibility_wired ) {
+			return;
+		}
+		self::$feedback_visibility_wired = true;
+
+		add_action(
+			'wp_footer',
+			function () {
+				?>
+				<style>
+					.customgpt-widget-wrapper div[class*="group-hover:opacity-100"] {
+						opacity: 1 !important;
+						background: #FDF1F1;
+						border-radius: 6px;
+						padding: 4px 10px !important;
+						gap: 6px !important;
+						margin-top: 8px !important;
+					}
+					.customgpt-widget-wrapper div[class*="group-hover:opacity-100"]::before {
+						content: "Was this helpful?";
+						font-size: 12px;
+						font-weight: 600;
+						color: #171717;
+						margin-right: 2px;
+						white-space: nowrap;
+					}
+					.customgpt-widget-wrapper div[class*="group-hover:opacity-100"] button {
+						width: 34px !important;
+						height: 34px !important;
+					}
+					.customgpt-widget-wrapper div[class*="group-hover:opacity-100"] button svg {
+						width: 18px !important;
+						height: 18px !important;
+					}
+					@media (max-width: 639.98px) {
+						.customgpt-widget-wrapper div[class*="group-hover:opacity-100"] {
+							flex-wrap: wrap;
+						}
+					}
+				</style>
 				<?php
 			},
 			20
