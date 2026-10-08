@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.19.5
+ * Version: 2.19.6
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -2780,6 +2780,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 						background: #ffffff !important;
 						border: 1px solid #E5B8B8 !important;
 						color: #171717 !important;
+						flex-shrink: 0 !important;
 					}
 					.customgpt-widget-wrapper div[class*="group-hover:opacity-100"] button svg {
 						width: 20px !important;
@@ -2810,9 +2811,22 @@ final class CustomGPT_Chat_Widget_Plugin {
 						border-color: #171717 !important;
 						color: #ffffff !important;
 					}
+					/*
+					 * At narrow widths the row wraps (label above, buttons
+					 * below) rather than shrinking - but the 3 buttons are
+					 * flex items of their own, so without flex-basis:100%
+					 * on the label they wrap individually (confirmed live:
+					 * the 3rd button broke onto its own line by itself).
+					 * Forcing the label to take the full row pushes all 3
+					 * buttons onto the next line together, so they always
+					 * stay next to each other - verified at 375px and 320px.
+					 */
 					@media (max-width: 639.98px) {
 						.customgpt-widget-wrapper div[class*="group-hover:opacity-100"] {
 							flex-wrap: wrap;
+						}
+						.customgpt-widget-wrapper div[class*="group-hover:opacity-100"]::before {
+							flex-basis: 100%;
 						}
 					}
 				</style>
