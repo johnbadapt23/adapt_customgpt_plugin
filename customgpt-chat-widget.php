@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.19.6
+ * Version: 2.19.7
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -226,6 +226,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 	private static $terms_link_patch_wired       = false;
 	private static $feedback_patch_wired         = false;
 	private static $feedback_visibility_wired    = false;
+	private static $table_responsive_style_wired = false;
 	private static $hero_placeholder_style_wired = false;
 	// Whether every [customgpt_chat] instance seen on this page so far
 	// is "embedded" mode. Only embedded mode has an SSR placeholder to
@@ -1375,6 +1376,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 		$this->enqueue_terms_link_patch_behavior();
 		$this->enqueue_feedback_patch_behavior();
 		$this->enqueue_feedback_visibility_style();
+		$this->enqueue_table_responsive_style();
 		?>
 		<script nowprocket data-no-minify="1">
 		( function () {
@@ -2828,6 +2830,54 @@ final class CustomGPT_Chat_Widget_Plugin {
 						.customgpt-widget-wrapper div[class*="group-hover:opacity-100"]::before {
 							flex-basis: 100%;
 						}
+					}
+				</style>
+				<?php
+			},
+			20
+		);
+	}
+
+	/**
+	 * Markdown tables in the widget's responses (e.g. comparison tables
+	 * across sectors/personas) use the browser's default table-layout:
+	 * auto, which sizes the table to fit its CONTENT, not its container.
+	 * The message bubble around it clips overflow (overflow: hidden)
+	 * rather than scrolling, so a wide table's right-hand columns were
+	 * being cut off outright instead of wrapping - confirmed live via
+	 * getComputedStyle() (table rendered at ~847px inside a ~383px
+	 * bubble) and reproduced with a live comparison-table response.
+	 *
+	 * Forcing table-layout: fixed at 100% width makes columns split
+	 * evenly within the available space and wrap their text instead of
+	 * overflowing. table-layout: auto (letting columns size themselves
+	 * within 100%) was tried first and rejected - with a short label
+	 * column next to long paragraph columns it starves the label column
+	 * down to one letter per line, which is worse than even columns.
+	 * Verified live at desktop and mobile (375px) widths with a real
+	 * 3-column comparison table.
+	 */
+	private function enqueue_table_responsive_style() {
+		if ( self::$table_responsive_style_wired ) {
+			return;
+		}
+		self::$table_responsive_style_wired = true;
+
+		add_action(
+			'wp_footer',
+			function () {
+				?>
+				<style>
+					.customgpt-widget-wrapper .prose table {
+						table-layout: fixed !important;
+						width: 100% !important;
+						max-width: 100% !important;
+					}
+					.customgpt-widget-wrapper .prose table td,
+					.customgpt-widget-wrapper .prose table th {
+						word-break: break-word !important;
+						overflow-wrap: break-word !important;
+						white-space: normal !important;
 					}
 				</style>
 				<?php
