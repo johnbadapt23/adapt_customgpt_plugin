@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.19.8
+ * Version: 2.19.9
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -3011,24 +3011,39 @@ final class CustomGPT_Chat_Widget_Plugin {
 	 * Best-effort lookup of a media library attachment matching the
 	 * given citation title (e.g. "CIO-Persona-Profile-v.2.pdf" as shown
 	 * in the citations list). Tries the exact filename first; if
-	 * that's not found, retries the same base name against a few
-	 * common office-document extensions before giving up - CustomGPT
-	 * citations are sometimes a PDF exported specifically for upload
-	 * there, while the file actually living in this site's media
-	 * library is still the original source format it was converted
-	 * from (e.g. the source PPTX). Every individual attempt is still an
-	 * exact filename match, never fuzzy - this only widens which exact
-	 * filename gets tried, not how loosely each one matches.
+	 * that's not found, retries a couple of normalized variants of the
+	 * same base name against a few common office-document extensions
+	 * before giving up. Every individual attempt is still an exact
+	 * filename match, never fuzzy - this only widens which exact
+	 * filename string gets tried, not how loosely each one matches.
+	 *
+	 * Two independent reasons a citation's title can fail to match the
+	 * file actually sitting in this site's media library, both
+	 * confirmed against real citations:
+	 *
+	 * - Format: CustomGPT citations are sometimes a PDF exported
+	 *   specifically for upload there, while the file in the media
+	 *   library is still the original source format it was converted
+	 *   from (e.g. the source PPTX).
+	 * - Spelling: CustomGPT's title is the document's own title as
+	 *   uploaded there - often still a human-readable name with spaces
+	 *   and mixed case (e.g. "Sector Outlook Healthcare 2026.pdf") -
+	 *   while WordPress sanitizes filenames on upload (lowercases,
+	 *   strips accents, replaces spaces/punctuation with hyphens), so
+	 *   the exact same document can end up stored as
+	 *   "sector-outlook-healthcare-2026.pdf". A straight exact-string
+	 *   match between the two never succeeds even though it's clearly
+	 *   the same file.
 	 *
 	 * Returns null - leaving the citation's original CustomGPT url (and
 	 * title) untouched - if nothing matches at all, or the title
 	 * doesn't look like a real filename. On a match, returns an array
 	 * with both the local 'url' and the 'filename' that actually
 	 * matched - the caller uses the latter to correct the displayed
-	 * title too when a fallback extension is what matched (e.g. a
-	 * citation titled "CFOs-Budget-Playbook.pdf" that only matched
-	 * "CFOs-Budget-Playbook.pptx" in the media library should say
-	 * ".pptx" in the widget too, not still claim to be the PDF).
+	 * title too when a fallback was what matched (e.g. a citation
+	 * titled "CFOs-Budget-Playbook.pdf" that only matched
+	 * "cfos-budget-playbook.pptx" in the media library should say that
+	 * in the widget too, not still claim to be "CFOs-Budget-Playbook.pdf").
 	 */
 	private function find_local_media_url_by_filename( $filename ) {
 		$filename = trim( (string) $filename );
@@ -3036,29 +3051,40 @@ final class CustomGPT_Chat_Widget_Plugin {
 			return null;
 		}
 
-		$url = $this->find_attachment_url_by_exact_filename( $filename );
-		if ( $url ) {
-			return array(
-				'url'      => $url,
-				'filename' => $filename,
-			);
-		}
-
 		$dot          = strrpos( $filename, '.' );
 		$base_name    = substr( $filename, 0, $dot );
 		$original_ext = strtolower( substr( $filename, $dot + 1 ) );
 
-		foreach ( array( 'pdf', 'pptx', 'ppt', 'docx', 'doc' ) as $fallback_ext ) {
-			if ( $fallback_ext === $original_ext ) {
-				continue; // Already tried above.
-			}
-			$candidate_filename = $base_name . '.' . $fallback_ext;
-			$url                = $this->find_attachment_url_by_exact_filename( $candidate_filename );
-			if ( $url ) {
-				return array(
-					'url'      => $url,
-					'filename' => $candidate_filename,
-				);
+		// sanitize_file_name() is the same normalization WordPress
+		// itself applies to a filename on upload (spaces/punctuation
+		// to hyphens, accents stripped) but - unlike WordPress's own
+		// upload flow - doesn't force lowercase, so a lowercased copy
+		// is tried too; between the two, this matches a sanitized
+		// filename regardless of whether the file in the library
+		// happens to keep its original casing or not. Order matters:
+		// the untouched title is tried first so an exact match (the
+		// common case) never pays for the extra variants, and
+		// duplicates are dropped so a title that's already fully
+		// lowercase/hyphenated (no normalization needed) doesn't
+		// repeat the same database lookup three times.
+		$sanitized_base   = sanitize_file_name( $base_name );
+		$lowercased_base  = strtolower( $sanitized_base );
+		$base_name_variants = array_unique( array( $base_name, $sanitized_base, $lowercased_base ) );
+
+		$extensions = array_unique(
+			array_merge( array( $original_ext ), array( 'pdf', 'pptx', 'ppt', 'docx', 'doc' ) )
+		);
+
+		foreach ( $base_name_variants as $candidate_base ) {
+			foreach ( $extensions as $candidate_ext ) {
+				$candidate_filename = $candidate_base . '.' . $candidate_ext;
+				$url                = $this->find_attachment_url_by_exact_filename( $candidate_filename );
+				if ( $url ) {
+					return array(
+						'url'      => $url,
+						'filename' => $candidate_filename,
+					);
+				}
 			}
 		}
 
