@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.19.9
+ * Version: 2.19.10
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -3180,8 +3180,32 @@ final class CustomGPT_Chat_Widget_Plugin {
 	 * as a whole, which the character-by-character curl passthrough
 	 * used for the chat endpoint isn't set up for, and doesn't need to
 	 * be: unlike chat, there's no "typing" effect to preserve here.
+	 *
+	 * Cached in a transient keyed by project+citation ID. Unlike the
+	 * chat endpoints, citation requests are NOT covered by the
+	 * fast-proxy accelerator (includes/customgpt-fast-proxy.php only
+	 * intercepts "create conversation" and "send message"), so every
+	 * citation was paying both WordPress's full admin-ajax bootstrap
+	 * cost AND a live, uncached round trip to CustomGPT's API - and a
+	 * single response can carry several citations, each fetched as
+	 * its own separate request by the widget bundle, so this stacked
+	 * up fast and is what made citations visibly slow to appear. A
+	 * cited document's title/url essentially never changes once
+	 * published, so caching the fully-processed response (after the
+	 * local media-library rewrite above, so a cache hit skips those
+	 * DB lookups too) for a day is safe and removes the repeat cost
+	 * for every reload of the same conversation and every other
+	 * visitor who encounters the same citation.
 	 */
-	private function proxy_citation_request( $url, $api_key ) {
+	private function proxy_citation_request( $url, $api_key, $cache_key ) {
+		$cached = get_transient( $cache_key );
+		if ( is_array( $cached ) && isset( $cached['code'], $cached['body'] ) ) {
+			status_header( (int) $cached['code'] );
+			header( 'Content-Type: application/json' );
+			echo $cached['body']; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- our own previously-generated JSON, re-served verbatim.
+			return;
+		}
+
 		$response = wp_remote_get(
 			$url,
 			array(
@@ -3224,9 +3248,15 @@ final class CustomGPT_Chat_Widget_Plugin {
 			}
 		}
 
+		$body_text = wp_json_encode( $body );
+
+		if ( 200 === $code ) {
+			set_transient( $cache_key, array( 'code' => $code, 'body' => $body_text ), DAY_IN_SECONDS );
+		}
+
 		status_header( $code );
 		header( 'Content-Type: application/json' );
-		echo wp_json_encode( $body );
+		echo $body_text; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- our own previously-generated JSON.
 	}
 
 	/**
@@ -3448,11 +3478,12 @@ final class CustomGPT_Chat_Widget_Plugin {
 		// file when one exists; everything else (in particular the
 		// streaming chat endpoint below) is completely untouched.
 		if (
-			preg_match( '#^/projects/\d+/citations/\d+$#', $path )
+			preg_match( '#^/projects/(\d+)/citations/(\d+)$#', $path, $citation_match )
 			&& isset( $_SERVER['REQUEST_METHOD'] )
 			&& 'GET' === strtoupper( sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) )
 		) {
-			$this->proxy_citation_request( $url, $api_key );
+			$citation_cache_key = 'customgpt_widget_citation_' . $citation_match[1] . '_' . $citation_match[2];
+			$this->proxy_citation_request( $url, $api_key, $citation_cache_key );
 			exit;
 		}
 
