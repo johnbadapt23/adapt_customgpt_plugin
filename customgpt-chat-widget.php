@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.19.10
+ * Version: 2.19.11
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -3063,10 +3063,10 @@ final class CustomGPT_Chat_Widget_Plugin {
 		// filename regardless of whether the file in the library
 		// happens to keep its original casing or not. Order matters:
 		// the untouched title is tried first so an exact match (the
-		// common case) never pays for the extra variants, and
-		// duplicates are dropped so a title that's already fully
-		// lowercase/hyphenated (no normalization needed) doesn't
-		// repeat the same database lookup three times.
+		// common case) is also the first one checked against the
+		// batch-query results below, and duplicates are dropped so a
+		// title that's already fully lowercase/hyphenated (no
+		// normalization needed) doesn't repeat the same candidate.
 		$sanitized_base   = sanitize_file_name( $base_name );
 		$lowercased_base  = strtolower( $sanitized_base );
 		$base_name_variants = array_unique( array( $base_name, $sanitized_base, $lowercased_base ) );
@@ -3075,16 +3075,45 @@ final class CustomGPT_Chat_Widget_Plugin {
 			array_merge( array( $original_ext ), array( 'pdf', 'pptx', 'ppt', 'docx', 'doc' ) )
 		);
 
+		// Every (base name variant, extension) combination this
+		// citation could plausibly match as, in priority order -
+		// $base_name_variants and $extensions together can be up to
+		// 3 x 6 = 18 candidate filenames. These used to be checked
+		// with one database round trip each (find_attachment_url_by_
+		// exact_filename(), removed below), up to 18 sequential
+		// queries for a single citation with no local match at all -
+		// the common case for a citation that was never uploaded to
+		// this site's media library to begin with. On a real site
+		// that's 18 network round trips to the database for every
+		// such citation, which is what made citations with many
+		// sources painfully slow to populate (see the transient caching
+		// in proxy_citation_request() for the repeat-view half of that
+		// fix; this is the first-view half).
+		// All candidates are now looked up together in a single query
+		// instead, and the first one (in priority order) that the
+		// query actually matched wins - identical matching behaviour,
+		// one database round trip no matter how many variants there
+		// are to try.
+		$candidates = array();
 		foreach ( $base_name_variants as $candidate_base ) {
 			foreach ( $extensions as $candidate_ext ) {
-				$candidate_filename = $candidate_base . '.' . $candidate_ext;
-				$url                = $this->find_attachment_url_by_exact_filename( $candidate_filename );
-				if ( $url ) {
-					return array(
-						'url'      => $url,
-						'filename' => $candidate_filename,
-					);
-				}
+				$candidates[] = $candidate_base . '.' . $candidate_ext;
+			}
+		}
+		$candidates = array_values( array_unique( $candidates ) );
+
+		$matched_attachment_ids = $this->find_attachment_ids_by_exact_filenames( $candidates );
+
+		foreach ( $candidates as $candidate_filename ) {
+			if ( empty( $matched_attachment_ids[ $candidate_filename ] ) ) {
+				continue;
+			}
+			$url = wp_get_attachment_url( $matched_attachment_ids[ $candidate_filename ] );
+			if ( $url ) {
+				return array(
+					'url'      => $url,
+					'filename' => $candidate_filename,
+				);
 			}
 		}
 
@@ -3092,49 +3121,80 @@ final class CustomGPT_Chat_Widget_Plugin {
 	}
 
 	/**
-	 * Exact-filename half of find_local_media_url_by_filename() above -
-	 * matches the _wp_attached_file postmeta (the real on-disk
-	 * filename, e.g. "2026/08/CIO-Persona-Profile-v.2.pdf") rather than
-	 * the post title, since WordPress sanitizes/spaces-to-dashes post
-	 * titles on upload but keeps the real filename intact.
+	 * Batched version of what used to be find_attachment_url_by_exact_
+	 * filename() - looks up every candidate filename find_local_media_
+	 * url_by_filename() wants to try in one database round trip instead
+	 * of one query per candidate (see the comment there for why that
+	 * mattered). Matches the _wp_attached_file postmeta (the real
+	 * on-disk filename, e.g. "2026/08/CIO-Persona-Profile-v.2.pdf")
+	 * rather than the post title, since WordPress sanitizes/spaces-to-
+	 * dashes post titles on upload but keeps the real filename intact.
 	 *
-	 * Matches only on a real path boundary - either the whole stored
-	 * value (a file uploaded with no year/month subfolder) or right
-	 * after a "/" (e.g. "2026/08/<filename>") - not just any suffix. A
-	 * plain "%filename" LIKE would also match an unrelated, longer
-	 * filename that merely happens to end with this one (e.g.
-	 * "XYZ-CIO-Persona-Profile-v.2.pdf").
+	 * Matches only on a real path boundary for each candidate - either
+	 * the whole stored value (a file uploaded with no year/month
+	 * subfolder) or right after a "/" (e.g. "2026/08/<filename>") -
+	 * not just any suffix. A plain "%filename" LIKE would also match
+	 * an unrelated, longer filename that merely happens to end with
+	 * this one (e.g. "XYZ-CIO-Persona-Profile-v.2.pdf").
 	 *
-	 * If more than one attachment still matches (the same filename
-	 * genuinely uploaded more than once, e.g. into different month
-	 * folders), the most recently uploaded one wins - WordPress already
-	 * renames on collision instead of silently overwriting, so two
-	 * distinct attachments sharing an exact filename are either an
+	 * Returns an array of candidate filename => attachment post ID,
+	 * containing only the candidates that actually matched something.
+	 * If more than one attachment matches the same candidate (the same
+	 * filename genuinely uploaded more than once, e.g. into different
+	 * month folders), the most recently uploaded one wins - WordPress
+	 * already renames on collision instead of silently overwriting, so
+	 * two distinct attachments sharing an exact filename are either an
 	 * intentional re-upload/replacement (newest is correct) or a
 	 * coincidence (arbitrary either way, and newest is the least
 	 * surprising default).
 	 */
-	private function find_attachment_url_by_exact_filename( $filename ) {
+	private function find_attachment_ids_by_exact_filenames( array $filenames ) {
 		global $wpdb;
 
-		$escaped       = $wpdb->esc_like( $filename );
-		$attachment_id = $wpdb->get_var(
+		if ( empty( $filenames ) ) {
+			return array();
+		}
+
+		$in_placeholders  = implode( ', ', array_fill( 0, count( $filenames ), '%s' ) );
+		$like_placeholders = implode(
+			' OR ',
+			array_fill( 0, count( $filenames ), 'meta_value LIKE %s' )
+		);
+
+		$params = $filenames;
+		foreach ( $filenames as $filename ) {
+			$params[] = '%/' . $wpdb->esc_like( $filename );
+		}
+
+		$rows = $wpdb->get_results(
 			$wpdb->prepare(
-				"SELECT post_id FROM {$wpdb->postmeta}
+				"SELECT post_id, meta_value FROM {$wpdb->postmeta}
 				WHERE meta_key = '_wp_attached_file'
-				AND ( meta_value = %s OR meta_value LIKE %s )
-				ORDER BY post_id DESC LIMIT 1",
-				$filename,
-				'%/' . $escaped
+				AND ( meta_value IN ($in_placeholders) OR $like_placeholders )
+				ORDER BY post_id DESC",
+				$params
 			)
 		);
 
-		if ( empty( $attachment_id ) ) {
-			return null;
+		$matches = array();
+		if ( $rows ) {
+			foreach ( $filenames as $filename ) {
+				foreach ( $rows as $row ) {
+					$meta_value = (string) $row->meta_value;
+					$is_match   = ( $meta_value === $filename )
+						|| ( substr( $meta_value, -( strlen( $filename ) + 1 ) ) === '/' . $filename );
+					if ( $is_match ) {
+						// $rows is already ORDER BY post_id DESC, so
+						// the first row seen per filename is the most
+						// recently uploaded attachment.
+						$matches[ $filename ] = (int) $row->post_id;
+						break;
+					}
+				}
+			}
 		}
 
-		$url = wp_get_attachment_url( (int) $attachment_id );
-		return $url ? $url : null;
+		return $matches;
 	}
 
 	/**
