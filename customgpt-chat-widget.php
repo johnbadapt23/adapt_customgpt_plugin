@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.19.11
+ * Version: 2.20.0
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -269,6 +269,25 @@ final class CustomGPT_Chat_Widget_Plugin {
 		// has_shortcode() against the raw post content - see
 		// maybe_print_resource_hints().
 		add_action( 'wp_head', array( $this, 'maybe_print_resource_hints' ), 1 );
+
+		// CustomGPT.ai's OWN officially-hosted floating chat-toggle
+		// widget (cdn.customgpt.ai/js/chat.js + CustomGPT.init()) - a
+		// completely separate integration from the [customgpt_chat]
+		// shortcode above, which self-hosts this plugin's own widget
+		// bundle and proxies every API call server-side so the API key
+		// never reaches the browser. This one is the opposite: it's
+		// CustomGPT's own client-side script, talking to their API
+		// directly from the visitor's browser using a project ID
+		// ("p_id") and a separate, publicly-exposable "p_key" - NOT the
+		// server-side API key used everywhere else in this file, and
+		// not a valid Authorization: Bearer credential for CustomGPT's
+		// REST API (confirmed live - it 401s there). Before this, sites
+		// embedded that <script> block directly in the theme with p_id/
+		// p_key hardcoded as string literals, so switching projects
+		// meant hand-editing theme code. This renders the identical
+		// snippet from the Settings page's values instead, so it can be
+		// changed in one place without touching the theme.
+		add_action( 'wp_footer', array( $this, 'maybe_print_floating_widget_script' ) );
 	}
 
 	/**
@@ -459,6 +478,33 @@ final class CustomGPT_Chat_Widget_Plugin {
 		);
 		register_setting(
 			'customgpt_chat_widget_settings',
+			'customgpt_widget_floating_enabled',
+			array(
+				'type'              => 'string',
+				'sanitize_callback' => array( $this, 'sanitize_checkbox' ),
+				'default'           => '0',
+			)
+		);
+		register_setting(
+			'customgpt_chat_widget_settings',
+			'customgpt_widget_floating_p_id',
+			array(
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_text_field',
+				'default'           => '',
+			)
+		);
+		register_setting(
+			'customgpt_chat_widget_settings',
+			'customgpt_widget_floating_p_key',
+			array(
+				'type'              => 'string',
+				'sanitize_callback' => 'sanitize_text_field',
+				'default'           => '',
+			)
+		);
+		register_setting(
+			'customgpt_chat_widget_settings',
 			'customgpt_widget_github_token',
 			array(
 				'type'              => 'string',
@@ -543,6 +589,27 @@ final class CustomGPT_Chat_Widget_Plugin {
 			'customgpt_widget_api_key',
 			'API Key',
 			array( $this, 'render_api_key_field' ),
+			'customgpt-chat-widget',
+			'customgpt_chat_widget_main'
+		);
+		add_settings_field(
+			'customgpt_widget_floating_enabled',
+			'Floating Widget (cdn.customgpt.ai)',
+			array( $this, 'render_floating_enabled_field' ),
+			'customgpt-chat-widget',
+			'customgpt_chat_widget_main'
+		);
+		add_settings_field(
+			'customgpt_widget_floating_p_id',
+			'Floating Widget Project ID (p_id)',
+			array( $this, 'render_floating_p_id_field' ),
+			'customgpt-chat-widget',
+			'customgpt_chat_widget_main'
+		);
+		add_settings_field(
+			'customgpt_widget_floating_p_key',
+			'Floating Widget Project Key (p_key)',
+			array( $this, 'render_floating_p_key_field' ),
 			'customgpt-chat-widget',
 			'customgpt_chat_widget_main'
 		);
@@ -676,6 +743,47 @@ final class CustomGPT_Chat_Widget_Plugin {
 		} else {
 			echo '<p class="description">Find this under API Keys in your CustomGPT dashboard. Only ever used server-side - never sent to the browser.</p>';
 		}
+	}
+
+	/**
+	 * Master on/off switch for the separate CustomGPT.ai-hosted floating
+	 * widget below (maybe_print_floating_widget_script()). Off by
+	 * default so installing/updating this plugin never makes a second
+	 * chat bubble suddenly appear on a site that didn't have one before
+	 * - a site owner has to deliberately turn this on and fill in the
+	 * two fields below it.
+	 */
+	public function render_floating_enabled_field() {
+		?>
+		<label>
+			<input type="hidden" name="customgpt_widget_floating_enabled" value="0" />
+			<input type="checkbox" name="customgpt_widget_floating_enabled" value="1" <?php checked( '1' === get_option( 'customgpt_widget_floating_enabled', '0' ) ); ?> />
+			Print CustomGPT.ai's own floating chat-toggle widget (cdn.customgpt.ai/js/chat.js) site-wide
+		</label>
+		<p class="description">
+			A completely separate integration from the [customgpt_chat] shortcode above - this is
+			CustomGPT's own officially-hosted widget script, loaded and run directly in the visitor's
+			browser, rather than this plugin's self-hosted bundle proxied through WordPress. Only takes
+			effect once both the Project ID and Project Key fields below are filled in, and still
+			respects the "Who Can See The Widget" setting further down this page.
+		</p>
+		<?php
+	}
+
+	public function render_floating_p_id_field() {
+		printf(
+			'<input type="text" name="customgpt_widget_floating_p_id" value="%s" class="regular-text" placeholder="e.g. 101914" />',
+			esc_attr( get_option( 'customgpt_widget_floating_p_id', '' ) )
+		);
+		echo '<p class="description">The <code>p_id</code> CustomGPT.init() expects - the project/agent ID from your CustomGPT dashboard URL. Can be a different project to the Agent ID field above; these two integrations are independent.</p>';
+	}
+
+	public function render_floating_p_key_field() {
+		printf(
+			'<input type="password" name="customgpt_widget_floating_p_key" value="%s" class="regular-text" autocomplete="new-password" />',
+			esc_attr( get_option( 'customgpt_widget_floating_p_key', '' ) )
+		);
+		echo '<p class="description">The <code>p_key</code> CustomGPT.init() expects, found alongside the Agent ID on that project\'s Deploy tab in your CustomGPT dashboard. This is NOT the server-side API Key field above - it is designed to be exposed in the browser, which is exactly what this does (the floating widget talks to CustomGPT directly from the visitor\'s browser, unlike the proxied shortcode widget).</p>';
 	}
 
 	public function render_github_token_field() {
@@ -919,6 +1027,64 @@ final class CustomGPT_Chat_Widget_Plugin {
 				esc_url( $this->widget_css_url() )
 			);
 		}
+	}
+
+	/**
+	 * Prints CustomGPT.ai's own officially-hosted floating chat-toggle
+	 * widget script - the <script src="https://cdn.customgpt.ai/js/chat.js">
+	 * + CustomGPT.init({ p_id, p_key }) snippet from their embed
+	 * instructions - using the Project ID/Key saved on this plugin's own
+	 * Settings page instead of two hardcoded string literals baked into
+	 * the theme. Site-wide (hooked to wp_footer in the constructor), not
+	 * tied to the [customgpt_chat] shortcode in any way - completely
+	 * separate integration, see the constructor's comment on that hook
+	 * for why. No-ops entirely unless explicitly turned on AND both
+	 * values are filled in, so updating this plugin can never make a
+	 * second, unconfigured chat bubble appear on a site that wasn't
+	 * already using this feature.
+	 *
+	 * p_key is deliberately printed here even though it's visible in the
+	 * page's HTML source - that's how CustomGPT's own embed snippet
+	 * works (this is their client-side widget talking to their API
+	 * directly from the browser), and it is NOT the same credential as
+	 * this plugin's own server-side API Key field, which never reaches
+	 * the browser. Don't confuse the two or assume this one needs the
+	 * same secrecy - see render_floating_p_key_field()'s description.
+	 */
+	public function maybe_print_floating_widget_script() {
+		if ( '1' !== get_option( 'customgpt_widget_floating_enabled', '0' ) ) {
+			return;
+		}
+		if ( ! $this->current_user_can_see_widget() ) {
+			return;
+		}
+
+		$p_id  = trim( (string) get_option( 'customgpt_widget_floating_p_id', '' ) );
+		$p_key = trim( (string) get_option( 'customgpt_widget_floating_p_key', '' ) );
+		if ( '' === $p_id || '' === $p_key ) {
+			return;
+		}
+
+		// wp_json_encode() rather than hand-built string concatenation -
+		// produces a safe, correctly-quoted/escaped JS object literal no
+		// matter what characters end up in either value.
+		$config_json = wp_json_encode(
+			array(
+				'p_id'  => $p_id,
+				'p_key' => $p_key,
+			)
+		);
+		?>
+		<script defer src="https://cdn.customgpt.ai/js/chat.js"></script>
+		<script defer>
+		( function () {
+			function init() {
+				CustomGPT.init( <?php echo $config_json; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- wp_json_encode() output, a safe JS object literal. ?> );
+			}
+			document.readyState === 'complete' ? init() : window.addEventListener( 'load', init );
+		} )();
+		</script>
+		<?php
 	}
 
 	/**
