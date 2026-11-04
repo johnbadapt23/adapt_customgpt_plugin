@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.20.0
+ * Version: 2.20.1
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -180,6 +180,27 @@ function customgpt_widget_get_external_id() {
 }
 
 /**
+ * The effective CustomGPT project/agent ID - a wp-config.php
+ * CUSTOMGPT_WIDGET_AGENT_ID constant (if set) always wins, otherwise
+ * the value saved on Settings -> CustomGPT Chat Widget. A standalone
+ * function for the same reason as customgpt_widget_get_external_id()
+ * above: theme code embedding CustomGPT.ai's own chat.js directly
+ * (window.__cgptConfig's p_id, or a floating-widget CustomGPT.init()
+ * call) can read the SAME id this plugin's own [customgpt_chat]
+ * shortcode uses, instead of a second, separately-maintained ID
+ * hardcoded in the theme that can silently drift out of sync with
+ * this one. Only this function decides the value -
+ * CustomGPT_Chat_Widget_Plugin::get_agent_id() below is a thin
+ * wrapper around it, used by this plugin's own shortcode/proxy.
+ */
+function customgpt_widget_get_agent_id() {
+	if ( defined( 'CUSTOMGPT_WIDGET_AGENT_ID' ) && '' !== CUSTOMGPT_WIDGET_AGENT_ID ) {
+		return CUSTOMGPT_WIDGET_AGENT_ID;
+	}
+	return get_option( 'customgpt_widget_agent_id', '' );
+}
+
+/**
  * Whether the current visitor is allowed to see the widget at all, per
  * the "Who Can See The Widget" setting (Settings -> CustomGPT Chat
  * Widget). A standalone function for the same reason as
@@ -297,10 +318,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 	 * via Settings -> CustomGPT Chat Widget, then '' if neither is set.
 	 */
 	private function get_agent_id() {
-		if ( defined( 'CUSTOMGPT_WIDGET_AGENT_ID' ) && '' !== CUSTOMGPT_WIDGET_AGENT_ID ) {
-			return CUSTOMGPT_WIDGET_AGENT_ID;
-		}
-		return get_option( 'customgpt_widget_agent_id', '' );
+		return customgpt_widget_get_agent_id();
 	}
 
 	/**
@@ -487,15 +505,6 @@ final class CustomGPT_Chat_Widget_Plugin {
 		);
 		register_setting(
 			'customgpt_chat_widget_settings',
-			'customgpt_widget_floating_p_id',
-			array(
-				'type'              => 'string',
-				'sanitize_callback' => 'sanitize_text_field',
-				'default'           => '',
-			)
-		);
-		register_setting(
-			'customgpt_chat_widget_settings',
 			'customgpt_widget_floating_p_key',
 			array(
 				'type'              => 'string',
@@ -596,13 +605,6 @@ final class CustomGPT_Chat_Widget_Plugin {
 			'customgpt_widget_floating_enabled',
 			'Floating Widget (cdn.customgpt.ai)',
 			array( $this, 'render_floating_enabled_field' ),
-			'customgpt-chat-widget',
-			'customgpt_chat_widget_main'
-		);
-		add_settings_field(
-			'customgpt_widget_floating_p_id',
-			'Floating Widget Project ID (p_id)',
-			array( $this, 'render_floating_p_id_field' ),
 			'customgpt-chat-widget',
 			'customgpt_chat_widget_main'
 		);
@@ -763,19 +765,12 @@ final class CustomGPT_Chat_Widget_Plugin {
 		<p class="description">
 			A completely separate integration from the [customgpt_chat] shortcode above - this is
 			CustomGPT's own officially-hosted widget script, loaded and run directly in the visitor's
-			browser, rather than this plugin's self-hosted bundle proxied through WordPress. Only takes
-			effect once both the Project ID and Project Key fields below are filled in, and still
-			respects the "Who Can See The Widget" setting further down this page.
+			browser, rather than this plugin's self-hosted bundle proxied through WordPress. Uses the
+			same Agent ID field above as its project ID, plus the Project Key field below - only takes
+			effect once both are filled in, and still respects the "Who Can See The Widget" setting
+			further down this page.
 		</p>
 		<?php
-	}
-
-	public function render_floating_p_id_field() {
-		printf(
-			'<input type="text" name="customgpt_widget_floating_p_id" value="%s" class="regular-text" placeholder="e.g. 101914" />',
-			esc_attr( get_option( 'customgpt_widget_floating_p_id', '' ) )
-		);
-		echo '<p class="description">The <code>p_id</code> CustomGPT.init() expects - the project/agent ID from your CustomGPT dashboard URL. Can be a different project to the Agent ID field above; these two integrations are independent.</p>';
 	}
 
 	public function render_floating_p_key_field() {
@@ -783,7 +778,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 			'<input type="password" name="customgpt_widget_floating_p_key" value="%s" class="regular-text" autocomplete="new-password" />',
 			esc_attr( get_option( 'customgpt_widget_floating_p_key', '' ) )
 		);
-		echo '<p class="description">The <code>p_key</code> CustomGPT.init() expects, found alongside the Agent ID on that project\'s Deploy tab in your CustomGPT dashboard. This is NOT the server-side API Key field above - it is designed to be exposed in the browser, which is exactly what this does (the floating widget talks to CustomGPT directly from the visitor\'s browser, unlike the proxied shortcode widget).</p>';
+		echo '<p class="description">The <code>p_key</code> CustomGPT.init() expects, paired with the Agent ID field above - find it alongside that same ID on the project\'s Deploy tab in your CustomGPT dashboard. This is NOT the server-side API Key field above - it is designed to be exposed in the browser, which is exactly what this does (the floating widget talks to CustomGPT directly from the visitor\'s browser, unlike the proxied shortcode widget).</p>';
 	}
 
 	public function render_github_token_field() {
@@ -1033,10 +1028,12 @@ final class CustomGPT_Chat_Widget_Plugin {
 	 * Prints CustomGPT.ai's own officially-hosted floating chat-toggle
 	 * widget script - the <script src="https://cdn.customgpt.ai/js/chat.js">
 	 * + CustomGPT.init({ p_id, p_key }) snippet from their embed
-	 * instructions - using the Project ID/Key saved on this plugin's own
-	 * Settings page instead of two hardcoded string literals baked into
-	 * the theme. Site-wide (hooked to wp_footer in the constructor), not
-	 * tied to the [customgpt_chat] shortcode in any way - completely
+	 * instructions - the project ID comes from the same Agent ID field
+	 * this plugin's own [customgpt_chat] shortcode already uses, and
+	 * the key from its own Project Key field, instead of two hardcoded
+	 * string literals baked into the theme. Site-wide (hooked to
+	 * wp_footer in the constructor), not tied to the [customgpt_chat]
+	 * shortcode in any way - completely
 	 * separate integration, see the constructor's comment on that hook
 	 * for why. No-ops entirely unless explicitly turned on AND both
 	 * values are filled in, so updating this plugin can never make a
@@ -1059,7 +1056,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 			return;
 		}
 
-		$p_id  = trim( (string) get_option( 'customgpt_widget_floating_p_id', '' ) );
+		$p_id  = trim( (string) $this->get_agent_id() );
 		$p_key = trim( (string) get_option( 'customgpt_widget_floating_p_key', '' ) );
 		if ( '' === $p_id || '' === $p_key ) {
 			return;
