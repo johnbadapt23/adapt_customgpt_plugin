@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.20.1
+ * Version: 2.20.2
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -265,6 +265,17 @@ final class CustomGPT_Chat_Widget_Plugin {
 		// Server-side proxy: browser never sees CUSTOMGPT_WIDGET_API_KEY.
 		add_action( 'wp_ajax_customgpt_proxy', array( $this, 'handle_proxy' ) );
 		add_action( 'wp_ajax_nopriv_customgpt_proxy', array( $this, 'handle_proxy' ) );
+
+		// Separate, much smaller AJAX action just for the floating
+		// widget's usage counter - see maybe_print_floating_widget_script()
+		// and handle_record_floating_usage() for the full story on why
+		// this exists as its own thing rather than reusing handle_proxy().
+		// No _nopriv_ companion: record_chat_message() is a no-op for a
+		// user id of 0 anyway (see its own comment), so there's nothing
+		// useful for an anonymous visitor's call to do once it reaches
+		// PHP - WordPress's default "0" response for an unregistered
+		// nopriv action is a fine outcome for that case.
+		add_action( 'wp_ajax_customgpt_record_floating_usage', array( $this, 'handle_record_floating_usage' ) );
 
 		// Per-logged-in-user "messages sent" usage tracking - see
 		// record_chat_message() and the Users-list column methods below.
@@ -1033,12 +1044,11 @@ final class CustomGPT_Chat_Widget_Plugin {
 	 * the key from its own Project Key field, instead of two hardcoded
 	 * string literals baked into the theme. Site-wide (hooked to
 	 * wp_footer in the constructor), not tied to the [customgpt_chat]
-	 * shortcode in any way - completely
-	 * separate integration, see the constructor's comment on that hook
-	 * for why. No-ops entirely unless explicitly turned on AND both
-	 * values are filled in, so updating this plugin can never make a
-	 * second, unconfigured chat bubble appear on a site that wasn't
-	 * already using this feature.
+	 * shortcode in any way - a completely separate integration, see
+	 * the constructor's comment on that hook for why. No-ops entirely
+	 * unless explicitly turned on AND both values are filled in, so
+	 * updating this plugin can never make a second, unconfigured chat
+	 * bubble appear on a site that wasn't already using this feature.
 	 *
 	 * p_key is deliberately printed here even though it's visible in the
 	 * page's HTML source - that's how CustomGPT's own embed snippet
@@ -1047,6 +1057,17 @@ final class CustomGPT_Chat_Widget_Plugin {
 	 * this plugin's own server-side API Key field, which never reaches
 	 * the browser. Don't confuse the two or assume this one needs the
 	 * same secrecy - see render_floating_p_key_field()'s description.
+	 *
+	 * Also wires up this widget's usage counter - see
+	 * handle_record_floating_usage()'s own docblock for the full story
+	 * on why this works differently (and less precisely) than the
+	 * self-hosted shortcode widget's count. Short version: this
+	 * widget's iframe (app.customgpt.ai) posts a window message with
+	 * action "update-conversation-session-id" once per conversation -
+	 * confirmed live (researchstaging1, 2026-11-13) that it does NOT
+	 * repeat on later messages within the same conversation, so that's
+	 * the only hook available. The inline script below listens for it
+	 * and pings handle_record_floating_usage() to increment the count.
 	 */
 	public function maybe_print_floating_widget_script() {
 		if ( '1' !== get_option( 'customgpt_widget_floating_enabled', '0' ) ) {
@@ -1071,6 +1092,16 @@ final class CustomGPT_Chat_Widget_Plugin {
 				'p_key' => $p_key,
 			)
 		);
+
+		// Everything the usage-tracking listener below needs to make
+		// its own fire-and-forget admin-ajax.php call, bundled the same
+		// safe way as $config_json above.
+		$usage_tracking_json = wp_json_encode(
+			array(
+				'ajaxUrl' => admin_url( 'admin-ajax.php' ),
+				'nonce'   => wp_create_nonce( 'customgpt_floating_usage' ),
+			)
+		);
 		?>
 		<script defer src="https://cdn.customgpt.ai/js/chat.js"></script>
 		<script defer>
@@ -1079,6 +1110,28 @@ final class CustomGPT_Chat_Widget_Plugin {
 				CustomGPT.init( <?php echo $config_json; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- wp_json_encode() output, a safe JS object literal. ?> );
 			}
 			document.readyState === 'complete' ? init() : window.addEventListener( 'load', init );
+
+			// Usage tracking - see this method's own docblock for why
+			// "a new conversation started" (not "a message was sent")
+			// is the only signal this widget exposes, and why it's
+			// still being folded into the same usage number as the
+			// self-hosted widget's per-message count regardless.
+			var usageTracking = <?php echo $usage_tracking_json; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- wp_json_encode() output, a safe JS object literal. ?>;
+			window.addEventListener( 'message', function ( event ) {
+				if ( event.origin !== 'https://app.customgpt.ai' ) {
+					return;
+				}
+				var data = event.data;
+				if ( ! data || 'update-conversation-session-id' !== data.action ) {
+					return;
+				}
+				var body = new FormData();
+				body.append( 'action', 'customgpt_record_floating_usage' );
+				body.append( 'nonce', usageTracking.nonce );
+				// keepalive so this still goes out even if the visitor
+				// navigates away immediately after starting a chat.
+				fetch( usageTracking.ajaxUrl, { method: 'POST', body: body, credentials: 'same-origin', keepalive: true } );
+			} );
 		} )();
 		</script>
 		<?php
@@ -3576,6 +3629,35 @@ final class CustomGPT_Chat_Widget_Plugin {
 		}
 		$current = (int) get_user_meta( $user_id, self::USAGE_META_KEY, true );
 		update_user_meta( $user_id, self::USAGE_META_KEY, $current + 1 );
+	}
+
+	/**
+	 * AJAX handler for the floating widget's usage counter - see
+	 * maybe_print_floating_widget_script(), which prints the small
+	 * inline script that calls this. That widget is CustomGPT's OWN
+	 * client-side script talking directly to their API; nothing it
+	 * does passes through this plugin's own proxy, so handle_proxy()'s
+	 * record_chat_message() call (right after a successful "send
+	 * message") never fires for it. The one thing observable from the
+	 * host page is the postMessage the iframe sends when a conversation
+	 * is created or resumed ("update-conversation-session-id") - tested
+	 * live and confirmed it fires once per conversation, NOT once per
+	 * message, so this undercounts relative to the self-hosted
+	 * [customgpt_chat] widget's per-message count. Reusing the same
+	 * USAGE_META_KEY despite that unit mismatch (conversations here,
+	 * messages there) was a deliberate choice, not an oversight - there
+	 * was no way to get a true per-message signal out of this widget.
+	 *
+	 * Deliberately its own tiny endpoint rather than folding this into
+	 * handle_proxy() - that method's entire structure (streaming curl
+	 * passthrough, path parsing, upstream auth) exists to talk to
+	 * CustomGPT's API, none of which applies here; this only ever
+	 * touches WordPress's own user meta.
+	 */
+	public function handle_record_floating_usage() {
+		check_ajax_referer( 'customgpt_floating_usage', 'nonce' );
+		$this->record_chat_message( get_current_user_id() );
+		wp_send_json_success();
 	}
 
 	/**
