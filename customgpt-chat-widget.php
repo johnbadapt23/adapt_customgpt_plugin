@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.20.2
+ * Version: 2.20.3
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -249,6 +249,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 	private static $feedback_visibility_wired    = false;
 	private static $table_responsive_style_wired = false;
 	private static $hero_placeholder_style_wired = false;
+	private static $beta_badge_style_wired       = false;
 	// Whether every [customgpt_chat] instance seen on this page so far
 	// is "embedded" mode. Only embedded mode has an SSR placeholder to
 	// hang a "load the JS bundle on first interaction" trigger off of
@@ -355,6 +356,45 @@ final class CustomGPT_Chat_Widget_Plugin {
 	 */
 	private function show_beta_badge() {
 		return '0' !== get_option( 'customgpt_widget_show_beta_badge', '1' );
+	}
+
+	/**
+	 * Hides the real (post-mount) widget's own BETA badge
+	 * (.cgpt-beta-badge, baked into the compiled JS bundle) when the
+	 * BETA Badge setting is off.
+	 *
+	 * Printed via wp_footer rather than inline inside
+	 * render_hero_placeholder_html(), where this override used to
+	 * live - that placeholder's entire contents get replaced outright
+	 * once the real widget bundle mounts (see that method's own
+	 * docblock), which silently deleted this exact <style> tag at the
+	 * exact moment it needed to keep applying: the badge would be
+	 * correctly hidden on the initial SSR paint, then pop back in the
+	 * instant the real widget took over. wp_footer survives that
+	 * swap - the same reason enqueue_feedback_visibility_style() and
+	 * enqueue_heading_patch_behavior() print their own overrides there
+	 * instead of inline in the placeholder.
+	 *
+	 * Called unconditionally from render_shortcode() (both embedded
+	 * and floating mode) rather than only from the embedded-only
+	 * placeholder branch, since the real widget bundle - and its
+	 * baked-in badge - mounts in floating mode too.
+	 */
+	private function enqueue_beta_badge_override_style() {
+		if ( $this->show_beta_badge() ) {
+			return;
+		}
+		if ( self::$beta_badge_style_wired ) {
+			return;
+		}
+		self::$beta_badge_style_wired = true;
+
+		add_action(
+			'wp_footer',
+			function () {
+				echo '<style>.cgpt-beta-badge{display:none!important}</style>';
+			}
+		);
 	}
 
 	/**
@@ -1422,13 +1462,6 @@ final class CustomGPT_Chat_Widget_Plugin {
 				}
 			</style>
 			<?php
-			if ( ! $this->show_beta_badge() ) {
-				// Hides the real, post-mount widget's own badge too -
-				// that markup is baked into the compiled JS bundle
-				// (.cgpt-beta-badge), so this CSS override is the only
-				// way to turn it off without patching that bundle.
-				echo '<style>.cgpt-beta-badge{display:none!important}</style>';
-			}
 		}
 
 		$example_questions = ! empty( $settings['example_questions'] ) ? $settings['example_questions'] : array();
@@ -1593,6 +1626,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 		$this->enqueue_feedback_patch_behavior();
 		$this->enqueue_feedback_visibility_style();
 		$this->enqueue_table_responsive_style();
+		$this->enqueue_beta_badge_override_style();
 		?>
 		<script nowprocket data-no-minify="1">
 		( function () {
