@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.20.10
+ * Version: 2.20.11
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -23,7 +23,7 @@ if ( ! defined( 'ABSPATH' ) ) {
  * cached citation, because nothing previously invalidated that cache
  * on update.
  */
-define( 'CUSTOMGPT_WIDGET_VERSION', '2.20.10' );
+define( 'CUSTOMGPT_WIDGET_VERSION', '2.20.11' );
 
 /*
  * Credentials.
@@ -264,6 +264,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 	private static $table_responsive_style_wired = false;
 	private static $hero_placeholder_style_wired = false;
 	private static $beta_badge_style_wired       = false;
+	private static $gated_preview_patch_wired    = false;
 	// Whether every [customgpt_chat] instance seen on this page so far
 	// is "embedded" mode. Only embedded mode has an SSR placeholder to
 	// hang a "load the JS bundle on first interaction" trigger off of
@@ -408,6 +409,135 @@ final class CustomGPT_Chat_Widget_Plugin {
 			function () {
 				echo '<style>.cgpt-beta-badge{display:none!important}</style>';
 			}
+		);
+	}
+
+	/**
+	 * Fixes "Preview file" 403ing on a citation whose matched local file
+	 * sits under this site's permanently-blocked, membership-gated
+	 * protected-reports folder (see GATED_UPLOADS_PATH_MARKER's own
+	 * docblock for why proxy_citation_request() leaves that citation's
+	 * "url" as the plain, un-wrapped blocked path rather than trying to
+	 * rewrite it server-side).
+	 *
+	 * The compiled widget bundle's "Preview file" button calls
+	 * window.open( citation.url, "_blank", "noopener,noreferrer" )
+	 * directly (confirmed by grepping dist/widget/customgpt-widget.b16.min.js)
+	 * - there's no hook into that click from outside the bundle, so this
+	 * patches window.open() itself instead: when it's called with a URL
+	 * containing the gated marker, it's intercepted and replaced with a
+	 * short-lived signed preview URL, minted via the theme's own
+	 * adapt_mint_preview_token AJAX action (functions.php) - which re-runs
+	 * the site's real membership check in the visitor's own browser
+	 * session (window.__adaptPreviewAuth, injected by the theme for
+	 * logged-in users) and only returns a token when that check passes.
+	 * Every other window.open() call (any URL not under the gated
+	 * marker) passes straight through to the original, completely
+	 * unaffected.
+	 *
+	 * A blank popup window is opened synchronously, before the async
+	 * mint request even starts, and its location is only set once the
+	 * signed URL comes back - some browsers' popup blockers only allow
+	 * window.open() when it's a direct, synchronous result of a user
+	 * gesture (a click), and by the time an async fetch() callback runs
+	 * that's no longer true from the browser's point of view.
+	 *
+	 * PDFs are pointed at the signed URL directly (the browser's native
+	 * viewer renders it inline); Office files (.pptx/.ppt/.docx/.doc)
+	 * are wrapped in Microsoft's Office Online Viewer around the signed
+	 * URL, exactly the way maybe_wrap_in_office_viewer() above already
+	 * does for non-gated local files - this has to happen client-side,
+	 * after minting, rather than being pre-wrapped server-side, since a
+	 * wrapped link pointed at the still-blocked file 403s identically to
+	 * an unwrapped one (confirmed live), and would also hide this
+	 * marker string (URL-encoded inside the wrapper's own query string)
+	 * from the indexOf() check below.
+	 *
+	 * No-ops entirely for a logged-out visitor, or any site that hasn't
+	 * set up window.__adaptPreviewAuth - the original citation link is
+	 * followed as-is (still 403s, same as before this existed) rather
+	 * than throwing partway through a broken rewrite.
+	 */
+	private function enqueue_gated_preview_override_script() {
+		if ( self::$gated_preview_patch_wired ) {
+			return;
+		}
+		self::$gated_preview_patch_wired = true;
+
+		add_action(
+			'wp_footer',
+			function () {
+				?>
+				<script nowprocket data-no-minify="1">
+				( function () {
+					var GATED_MARKER       = <?php echo wp_json_encode( self::GATED_UPLOADS_PATH_MARKER ); ?>;
+					var OFFICE_EXTENSIONS  = [ 'pptx', 'ppt', 'docx', 'doc' ];
+					var originalWindowOpen = window.open;
+
+					function getExtension( url ) {
+						try {
+							var path = new URL( url, window.location.href ).pathname;
+							var dot  = path.lastIndexOf( '.' );
+							return -1 === dot ? '' : path.slice( dot + 1 ).toLowerCase();
+						} catch ( e ) {
+							return '';
+						}
+					}
+
+					function mintPreviewUrl( fileUrl ) {
+						var auth = window.__adaptPreviewAuth;
+						if ( ! auth || ! auth.ajaxUrl || ! auth.nonce ) {
+							return Promise.reject( new Error( 'You need to be logged in to preview this file.' ) );
+						}
+						return fetch( auth.ajaxUrl, {
+							method: 'POST',
+							headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+							body: new URLSearchParams( {
+								action: 'adapt_mint_preview_token',
+								nonce: auth.nonce,
+								file_path: fileUrl,
+							} ),
+						} )
+							.then( function ( res ) { return res.json(); } )
+							.then( function ( json ) {
+								if ( ! json || ! json.success ) {
+									throw new Error( ( json && json.data && json.data.message ) || 'Unable to preview this file.' );
+								}
+								return json.data.url;
+							} );
+					}
+
+					window.open = function ( url, target, features ) {
+						if ( 'string' !== typeof url || -1 === url.indexOf( GATED_MARKER ) ) {
+							return originalWindowOpen.call( window, url, target, features );
+						}
+
+						var popup = originalWindowOpen.call( window, 'about:blank', target, features );
+
+						mintPreviewUrl( url )
+							.then( function ( signedUrl ) {
+								var ext      = getExtension( url );
+								var finalUrl = ( -1 !== OFFICE_EXTENSIONS.indexOf( ext ) )
+									? 'https://view.officeapps.live.com/op/view.aspx?src=' + encodeURIComponent( signedUrl )
+									: signedUrl;
+								if ( popup && ! popup.closed ) {
+									popup.location = finalUrl;
+								}
+							} )
+							.catch( function ( err ) {
+								if ( popup && ! popup.closed ) {
+									popup.close();
+								}
+								window.alert( err && err.message ? err.message : 'Unable to preview this file.' );
+							} );
+
+						return popup;
+					};
+				} )();
+				</script>
+				<?php
+			},
+			20
 		);
 	}
 
@@ -1641,6 +1771,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 		$this->enqueue_feedback_visibility_style();
 		$this->enqueue_table_responsive_style();
 		$this->enqueue_beta_badge_override_style();
+		$this->enqueue_gated_preview_override_script();
 		?>
 		<script nowprocket data-no-minify="1">
 		( function () {
@@ -3494,222 +3625,34 @@ final class CustomGPT_Chat_Widget_Plugin {
 	 * Marks which uploads subfolder is deliberately, permanently blocked
 	 * at the webserver level (an unconditional .htaccess deny-all under
 	 * /wp-content/uploads/protected-reports/ - confirmed live: it 403s
-	 * every request, including a logged-in administrator's). That block
+	 * every request, including a logged-in administrator's, for both a
+	 * direct link and a view.officeapps.live.com-wrapped one). That block
 	 * is intentional, not a bug: these reports are meant to be gated by
-	 * membership, not merely by being logged in, and the theme's own
-	 * adapt_gated_download_handler() (functions.php, ?adapt_download=
-	 * <post_id>) is where that membership check actually happens, for
-	 * the ordinary post-page download links.
+	 * membership, not merely by being logged in.
 	 *
 	 * The problem this constant exists to fix: when one of these PDFs
 	 * was ingested into the CustomGPT agent via a website crawl (as
 	 * opposed to being added as its own File Upload with "Kept for
 	 * viewing" on), its citation's "url" ends up pointing straight at
 	 * this blocked path - so "Preview file" 403s for every visitor,
-	 * including admins, instead of ever reaching the membership check
-	 * at all. See resolve_gated_download_post_id_by_url() below, which
-	 * is how proxy_citation_request() detects and fixes this.
+	 * including admins, before ever reaching any membership check at
+	 * all. proxy_citation_request() leaves a citation whose local-media
+	 * match falls under this marker as its plain, un-wrapped URL (see
+	 * that method's own comment), and
+	 * enqueue_gated_preview_override_script() below is what actually
+	 * fixes the 403: it recognises this same marker in the widget's
+	 * "Preview file" link at click time, in the visitor's own browser,
+	 * and mints a short-lived signed preview URL through the theme's
+	 * real membership check (functions.php's adapt_mint_preview_token
+	 * AJAX action) instead of following the blocked link directly.
+	 *
+	 * An earlier version of this fix instead tried to rewrite these
+	 * citations server-side to the theme's existing ?adapt_download=
+	 * <post_id> link (a DOWNLOAD, not a preview) - replaced by the
+	 * approach above once the theme grew a real signed-preview-token
+	 * endpoint purpose-built for this.
 	 */
 	const GATED_UPLOADS_PATH_MARKER = '/uploads/protected-reports/';
-
-	/**
-	 * When a citation's "url" points at this site's own permanently-
-	 * blocked protected-reports folder (see GATED_UPLOADS_PATH_MARKER
-	 * above), this resolves which published post the file actually
-	 * belongs to, so the caller (proxy_citation_request()) can rewrite
-	 * the citation to that post's own gated download link
-	 * (?adapt_download=<post_id>) instead - the same link the rest of
-	 * the site already uses, which the theme's
-	 * adapt_gated_download_handler() (functions.php) authorizes via
-	 * MemberPress, not merely via is_user_logged_in().
-	 *
-	 * Deliberately only a URL -> post ID lookup, never a permission
-	 * check in its own right - no gating decision is made here, or
-	 * anywhere in this plugin. The actual MemberPress authorization
-	 * happens entirely in the theme's handler, the moment the visitor's
-	 * own browser requests the rewritten link (which is why this only
-	 * works when the rewrite happens server-side, as a plain string
-	 * substitution in the proxied JSON body, and the resulting link is
-	 * then followed by the visitor's own browser carrying their own
-	 * WordPress session cookie - never fetched by this server itself,
-	 * which has no such cookie to send).
-	 *
-	 * Mirrors the two ways adapt_gated_download_handler() locates a
-	 * post's file, just run in reverse (file -> post instead of
-	 * post -> file), since neither stores that reverse mapping
-	 * anywhere:
-	 *
-	 * - Path 1 ('download_link' repeater): the ACF sub-field
-	 *   'download_url' stores the file's own URL directly on the post,
-	 *   so a LIKE match on wp_postmeta.meta_value against the file's
-	 *   basename finds it directly.
-	 * - Path 2/3 ('slide_preview_module' / 'preview_module' repeaters):
-	 *   the 'download' sub-field stores a media-library attachment ID
-	 *   instead of a URL, so the attachment is found first (reusing
-	 *   find_attachment_ids_by_exact_filenames() - the exact same exact-
-	 *   filename matching already used for the unrelated local-media-
-	 *   library rewrite above), then whichever post's postmeta
-	 *   references that attachment ID under a sub-field ending in
-	 *   "_download" is the owning post.
-	 *
-	 * Returns 0 if the URL isn't under the gated folder at all, or no
-	 * published post can be matched to it (in which case the caller
-	 * leaves the citation's URL untouched - still broken, but no worse
-	 * than before, rather than risking a wrong rewrite).
-	 */
-	private function resolve_gated_download_post_id_by_url( $url ) {
-		$url = trim( (string) $url );
-		if ( '' === $url || false === strpos( $url, self::GATED_UPLOADS_PATH_MARKER ) ) {
-			return 0;
-		}
-
-		$filename = basename( (string) wp_parse_url( $url, PHP_URL_PATH ) );
-		if ( '' === $filename ) {
-			return 0;
-		}
-
-		global $wpdb;
-
-		// Path 1: 'download_link' repeater's 'download_url' sub-field -
-		// the ACF sub-field key always ends in "_download_url"
-		// regardless of the repeater row index, so a LIKE on meta_key
-		// matches any row without needing to know the index.
-		$post_id = (int) $wpdb->get_var(
-			$wpdb->prepare(
-				"SELECT post_id FROM {$wpdb->postmeta}
-				WHERE meta_key LIKE %s AND meta_value LIKE %s
-				ORDER BY post_id DESC LIMIT 1",
-				'%' . $wpdb->esc_like( 'download_url' ),
-				'%' . $wpdb->esc_like( $filename )
-			)
-		);
-		if ( $post_id > 0 && 'publish' === get_post_status( $post_id ) ) {
-			return $post_id;
-		}
-
-		// Path 2/3: 'slide_preview_module' / 'preview_module' repeaters'
-		// 'download' sub-field - resolve the attachment ID first, then
-		// find whichever post's postmeta points at it under a sub-field
-		// ending in "_download" (as opposed to "_download_url" above -
-		// the trailing underscore boundary is what keeps the two paths
-		// from matching each other's rows).
-		$attachment_matches = $this->find_attachment_ids_by_exact_filenames( array( $filename ) );
-		$attachment_id      = isset( $attachment_matches[ $filename ] ) ? (int) $attachment_matches[ $filename ] : 0;
-		if ( $attachment_id <= 0 ) {
-			return 0;
-		}
-
-		$post_id = (int) $wpdb->get_var(
-			$wpdb->prepare(
-				"SELECT post_id FROM {$wpdb->postmeta}
-				WHERE meta_key LIKE %s AND meta_value = %s
-				ORDER BY post_id DESC LIMIT 1",
-				'%' . $wpdb->esc_like( '_download' ),
-				(string) $attachment_id
-			)
-		);
-		if ( $post_id > 0 && 'publish' === get_post_status( $post_id ) ) {
-			return $post_id;
-		}
-
-		return 0;
-	}
-
-	/**
-	 * TEMPORARY diagnostic for resolve_gated_download_post_id_by_url() -
-	 * see the ?customgpt_debug_gate=1 branch in handle_proxy() above.
-	 * Fetches the citation live (never from cache) and reports, as plain
-	 * JSON, every intermediate value the real resolver computes against
-	 * this production database, so a live mismatch can be diagnosed
-	 * directly rather than guessed at. Remove this method and its call
-	 * site together once no longer needed.
-	 */
-	private function debug_gated_download_lookup( $url, $api_key ) {
-		$response = wp_remote_get(
-			$url,
-			array(
-				'headers' => array(
-					'Authorization' => 'Bearer ' . $api_key,
-					'Accept'        => 'application/json',
-				),
-				'timeout' => 15,
-			)
-		);
-
-		$raw_citation_url = '';
-		$citation_title   = '';
-		if ( ! is_wp_error( $response ) ) {
-			$decoded         = json_decode( wp_remote_retrieve_body( $response ), true );
-			$raw_citation_url = ( is_array( $decoded ) && ! empty( $decoded['data']['url'] ) ) ? (string) $decoded['data']['url'] : '';
-			$citation_title   = ( is_array( $decoded ) && ! empty( $decoded['data']['title'] ) ) ? (string) $decoded['data']['title'] : '';
-		}
-
-		// Mirror proxy_citation_request()'s own logic exactly: the raw
-		// CustomGPT API "url" is almost never the blocked local path on
-		// its own (it's usually CustomGPT's own app.customgpt.ai preview
-		// link) - it only becomes the blocked local URL AFTER
-		// find_local_media_url_by_filename() rewrites it, by matching the
-		// citation's TITLE against this site's media library. Checking
-		// the raw, pre-rewrite URL here (as an earlier version of this
-		// diagnostic did) always reported marker_hit = false and
-		// resolved_post_id = 0, even when the real, full pipeline's
-		// rewritten URL matched correctly - it was testing the wrong
-		// stage.
-		$local_match  = ( '' !== $citation_title ) ? $this->find_local_media_url_by_filename( $citation_title ) : null;
-		$citation_url = $local_match ? $local_match['url'] : $raw_citation_url;
-
-		$marker_hit = ( '' !== $citation_url ) && ( false !== strpos( $citation_url, self::GATED_UPLOADS_PATH_MARKER ) );
-		$filename   = $marker_hit ? basename( (string) wp_parse_url( $citation_url, PHP_URL_PATH ) ) : '';
-
-		global $wpdb;
-
-		$path1_rows = array();
-		if ( '' !== $filename ) {
-			$path1_rows = $wpdb->get_results(
-				$wpdb->prepare(
-					"SELECT post_id, meta_key, meta_value FROM {$wpdb->postmeta}
-					WHERE meta_key LIKE %s AND meta_value LIKE %s
-					ORDER BY post_id DESC LIMIT 5",
-					'%' . $wpdb->esc_like( 'download_url' ),
-					'%' . $wpdb->esc_like( $filename )
-				),
-				ARRAY_A
-			);
-		}
-
-		$attachment_matches = ( '' !== $filename ) ? $this->find_attachment_ids_by_exact_filenames( array( $filename ) ) : array();
-
-		$path23_rows = array();
-		if ( ! empty( $attachment_matches[ $filename ] ) ) {
-			$path23_rows = $wpdb->get_results(
-				$wpdb->prepare(
-					"SELECT post_id, meta_key, meta_value FROM {$wpdb->postmeta}
-					WHERE meta_key LIKE %s AND meta_value = %s
-					ORDER BY post_id DESC LIMIT 5",
-					'%' . $wpdb->esc_like( '_download' ),
-					(string) $attachment_matches[ $filename ]
-				),
-				ARRAY_A
-			);
-		}
-
-		status_header( 200 );
-		header( 'Content-Type: application/json' );
-		echo wp_json_encode( // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- diagnostic-only output, not rendered as HTML anywhere.
-			array(
-				'raw_citation_url'   => $raw_citation_url,
-				'citation_title'     => $citation_title,
-				'local_match'        => $local_match,
-				'citation_url'       => $citation_url,
-				'marker_hit'         => $marker_hit,
-				'filename'           => $filename,
-				'path1_rows'         => $path1_rows,
-				'attachment_matches' => $attachment_matches,
-				'path23_rows'        => $path23_rows,
-				'resolved_post_id'   => $this->resolve_gated_download_post_id_by_url( $citation_url ),
-			)
-		);
-	}
 
 	/**
 	 * Fetches a single citation's details - a small, ordinary JSON
@@ -3781,7 +3724,28 @@ final class CustomGPT_Chat_Widget_Plugin {
 			$original_title = (string) $body['data']['title'];
 			$match          = $this->find_local_media_url_by_filename( $original_title );
 			if ( $match ) {
-				$body['data']['url'] = $this->maybe_wrap_in_office_viewer( $match['url'], $match['filename'] );
+				// A match under this site's permanently-blocked,
+				// membership-gated uploads folder (a citation sourced
+				// from a website crawl, rather than a File Upload, can
+				// point straight at a file under there) is left as its
+				// plain, un-wrapped local URL - never passed through
+				// maybe_wrap_in_office_viewer() below, since that .htaccess
+				// block is unconditional at the webserver level and 403s
+				// an officeapps.live.com-wrapped link exactly the same as
+				// a direct one (confirmed live). Instead, the client-side
+				// preview-token override script (see
+				// enqueue_gated_preview_override_script()) recognises this
+				// exact marker in the widget's "Preview file" url at click
+				// time, mints a short-lived signed preview URL via the
+				// theme's real membership check, and does the Office-
+				// viewer wrap itself around THAT signed URL when needed -
+				// wrapping the still-blocked URL here would bake the
+				// blocked path into the wrapper's own query string, which
+				// 403s identically, and would also hide the marker string
+				// (URL-encoded inside that query string) from the
+				// client-side script's plain substring match.
+				$is_gated             = ( false !== strpos( $match['url'], self::GATED_UPLOADS_PATH_MARKER ) );
+				$body['data']['url']  = $is_gated ? $match['url'] : $this->maybe_wrap_in_office_viewer( $match['url'], $match['filename'] );
 				// Reflect the matched file's actual extension in the
 				// displayed title too, so a citation that only matched
 				// via the fallback extensions above (e.g. found a
@@ -3789,25 +3753,6 @@ final class CustomGPT_Chat_Widget_Plugin {
 				// filename that doesn't match what actually opens.
 				if ( $match['filename'] !== $original_title ) {
 					$body['data']['title'] = $match['filename'];
-				}
-			}
-
-			// Whatever the "url" ended up being above (CustomGPT's own
-			// value, or the local-media rewrite just above), check it
-			// against this site's permanently-blocked, membership-gated
-			// uploads folder last - a citation sourced from a website
-			// crawl (rather than a File Upload) can point straight at a
-			// file under there, which otherwise 403s for every visitor,
-			// including admins, since that block is unconditional at
-			// the webserver level. See resolve_gated_download_post_id_
-			// by_url()'s docblock for the full reasoning and why this
-			// rewrite is safe to do server-side even though the actual
-			// authorization only happens once the visitor's own browser
-			// follows the resulting link.
-			if ( ! empty( $body['data']['url'] ) ) {
-				$gated_post_id = $this->resolve_gated_download_post_id_by_url( (string) $body['data']['url'] );
-				if ( $gated_post_id > 0 ) {
-					$body['data']['url'] = add_query_arg( 'adapt_download', $gated_post_id, home_url( '/' ) );
 				}
 			}
 		}
@@ -4075,21 +4020,6 @@ final class CustomGPT_Chat_Widget_Plugin {
 			&& isset( $_SERVER['REQUEST_METHOD'] )
 			&& 'GET' === strtoupper( sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) )
 		) {
-			// TEMPORARY, to be removed once the protected-reports -> post ID
-			// lookup is confirmed working live: ?customgpt_debug_gate=1 on
-			// this same endpoint bypasses the normal cached proxy entirely
-			// and instead reports, as plain JSON, exactly what
-			// resolve_gated_download_post_id_by_url() sees when run against
-			// this citation's real URL right now - no admin auth required,
-			// since it only reveals which post (if any) a given public
-			// citation URL maps to, nothing sensitive. Lets this be
-			// diagnosed directly against the live production database
-			// without any server/DB access of its own.
-			if ( isset( $_GET['customgpt_debug_gate'] ) ) {
-				$this->debug_gated_download_lookup( $url, $api_key );
-				exit;
-			}
-
 			$citation_cache_key = 'customgpt_widget_citation_' . str_replace( '.', '', CUSTOMGPT_WIDGET_VERSION ) . '_' . $citation_match[1] . '_' . $citation_match[2];
 			$this->proxy_citation_request( $url, $api_key, $citation_cache_key );
 			exit;
