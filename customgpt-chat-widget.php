@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.20.6
+ * Version: 2.20.7
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -3477,6 +3477,131 @@ final class CustomGPT_Chat_Widget_Plugin {
 	}
 
 	/**
+	 * Marks which uploads subfolder is deliberately, permanently blocked
+	 * at the webserver level (an unconditional .htaccess deny-all under
+	 * /wp-content/uploads/protected-reports/ - confirmed live: it 403s
+	 * every request, including a logged-in administrator's). That block
+	 * is intentional, not a bug: these reports are meant to be gated by
+	 * membership, not merely by being logged in, and the theme's own
+	 * adapt_gated_download_handler() (functions.php, ?adapt_download=
+	 * <post_id>) is where that membership check actually happens, for
+	 * the ordinary post-page download links.
+	 *
+	 * The problem this constant exists to fix: when one of these PDFs
+	 * was ingested into the CustomGPT agent via a website crawl (as
+	 * opposed to being added as its own File Upload with "Kept for
+	 * viewing" on), its citation's "url" ends up pointing straight at
+	 * this blocked path - so "Preview file" 403s for every visitor,
+	 * including admins, instead of ever reaching the membership check
+	 * at all. See resolve_gated_download_post_id_by_url() below, which
+	 * is how proxy_citation_request() detects and fixes this.
+	 */
+	const GATED_UPLOADS_PATH_MARKER = '/uploads/protected-reports/';
+
+	/**
+	 * When a citation's "url" points at this site's own permanently-
+	 * blocked protected-reports folder (see GATED_UPLOADS_PATH_MARKER
+	 * above), this resolves which published post the file actually
+	 * belongs to, so the caller (proxy_citation_request()) can rewrite
+	 * the citation to that post's own gated download link
+	 * (?adapt_download=<post_id>) instead - the same link the rest of
+	 * the site already uses, which the theme's
+	 * adapt_gated_download_handler() (functions.php) authorizes via
+	 * MemberPress, not merely via is_user_logged_in().
+	 *
+	 * Deliberately only a URL -> post ID lookup, never a permission
+	 * check in its own right - no gating decision is made here, or
+	 * anywhere in this plugin. The actual MemberPress authorization
+	 * happens entirely in the theme's handler, the moment the visitor's
+	 * own browser requests the rewritten link (which is why this only
+	 * works when the rewrite happens server-side, as a plain string
+	 * substitution in the proxied JSON body, and the resulting link is
+	 * then followed by the visitor's own browser carrying their own
+	 * WordPress session cookie - never fetched by this server itself,
+	 * which has no such cookie to send).
+	 *
+	 * Mirrors the two ways adapt_gated_download_handler() locates a
+	 * post's file, just run in reverse (file -> post instead of
+	 * post -> file), since neither stores that reverse mapping
+	 * anywhere:
+	 *
+	 * - Path 1 ('download_link' repeater): the ACF sub-field
+	 *   'download_url' stores the file's own URL directly on the post,
+	 *   so a LIKE match on wp_postmeta.meta_value against the file's
+	 *   basename finds it directly.
+	 * - Path 2/3 ('slide_preview_module' / 'preview_module' repeaters):
+	 *   the 'download' sub-field stores a media-library attachment ID
+	 *   instead of a URL, so the attachment is found first (reusing
+	 *   find_attachment_ids_by_exact_filenames() - the exact same exact-
+	 *   filename matching already used for the unrelated local-media-
+	 *   library rewrite above), then whichever post's postmeta
+	 *   references that attachment ID under a sub-field ending in
+	 *   "_download" is the owning post.
+	 *
+	 * Returns 0 if the URL isn't under the gated folder at all, or no
+	 * published post can be matched to it (in which case the caller
+	 * leaves the citation's URL untouched - still broken, but no worse
+	 * than before, rather than risking a wrong rewrite).
+	 */
+	private function resolve_gated_download_post_id_by_url( $url ) {
+		$url = trim( (string) $url );
+		if ( '' === $url || false === strpos( $url, self::GATED_UPLOADS_PATH_MARKER ) ) {
+			return 0;
+		}
+
+		$filename = basename( (string) wp_parse_url( $url, PHP_URL_PATH ) );
+		if ( '' === $filename ) {
+			return 0;
+		}
+
+		global $wpdb;
+
+		// Path 1: 'download_link' repeater's 'download_url' sub-field -
+		// the ACF sub-field key always ends in "_download_url"
+		// regardless of the repeater row index, so a LIKE on meta_key
+		// matches any row without needing to know the index.
+		$post_id = (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT post_id FROM {$wpdb->postmeta}
+				WHERE meta_key LIKE %s AND meta_value LIKE %s
+				ORDER BY post_id DESC LIMIT 1",
+				'%' . $wpdb->esc_like( 'download_url' ),
+				'%' . $wpdb->esc_like( $filename )
+			)
+		);
+		if ( $post_id > 0 && 'publish' === get_post_status( $post_id ) ) {
+			return $post_id;
+		}
+
+		// Path 2/3: 'slide_preview_module' / 'preview_module' repeaters'
+		// 'download' sub-field - resolve the attachment ID first, then
+		// find whichever post's postmeta points at it under a sub-field
+		// ending in "_download" (as opposed to "_download_url" above -
+		// the trailing underscore boundary is what keeps the two paths
+		// from matching each other's rows).
+		$attachment_matches = $this->find_attachment_ids_by_exact_filenames( array( $filename ) );
+		$attachment_id      = isset( $attachment_matches[ $filename ] ) ? (int) $attachment_matches[ $filename ] : 0;
+		if ( $attachment_id <= 0 ) {
+			return 0;
+		}
+
+		$post_id = (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT post_id FROM {$wpdb->postmeta}
+				WHERE meta_key LIKE %s AND meta_value = %s
+				ORDER BY post_id DESC LIMIT 1",
+				'%' . $wpdb->esc_like( '_download' ),
+				(string) $attachment_id
+			)
+		);
+		if ( $post_id > 0 && 'publish' === get_post_status( $post_id ) ) {
+			return $post_id;
+		}
+
+		return 0;
+	}
+
+	/**
 	 * Fetches a single citation's details - a small, ordinary JSON
 	 * response, not a stream - and, when its title matches a filename
 	 * in this site's media library, rewrites the "url" field so the
@@ -3554,6 +3679,25 @@ final class CustomGPT_Chat_Widget_Plugin {
 				// filename that doesn't match what actually opens.
 				if ( $match['filename'] !== $original_title ) {
 					$body['data']['title'] = $match['filename'];
+				}
+			}
+
+			// Whatever the "url" ended up being above (CustomGPT's own
+			// value, or the local-media rewrite just above), check it
+			// against this site's permanently-blocked, membership-gated
+			// uploads folder last - a citation sourced from a website
+			// crawl (rather than a File Upload) can point straight at a
+			// file under there, which otherwise 403s for every visitor,
+			// including admins, since that block is unconditional at
+			// the webserver level. See resolve_gated_download_post_id_
+			// by_url()'s docblock for the full reasoning and why this
+			// rewrite is safe to do server-side even though the actual
+			// authorization only happens once the visitor's own browser
+			// follows the resulting link.
+			if ( ! empty( $body['data']['url'] ) ) {
+				$gated_post_id = $this->resolve_gated_download_post_id_by_url( (string) $body['data']['url'] );
+				if ( $gated_post_id > 0 ) {
+					$body['data']['url'] = add_query_arg( 'adapt_download', $gated_post_id, home_url( '/' ) );
 				}
 			}
 		}
