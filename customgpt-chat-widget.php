@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.20.11
+ * Version: 2.20.12
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -23,7 +23,7 @@ if ( ! defined( 'ABSPATH' ) ) {
  * cached citation, because nothing previously invalidated that cache
  * on update.
  */
-define( 'CUSTOMGPT_WIDGET_VERSION', '2.20.11' );
+define( 'CUSTOMGPT_WIDGET_VERSION', '2.20.12' );
 
 /*
  * Credentials.
@@ -512,7 +512,24 @@ final class CustomGPT_Chat_Widget_Plugin {
 							return originalWindowOpen.call( window, url, target, features );
 						}
 
-						var popup = originalWindowOpen.call( window, 'about:blank', target, features );
+						// Deliberately NOT passing the original features
+						// through here - the widget calls window.open()
+						// with "noopener,noreferrer", and per spec,
+						// window.open() with "noopener" in its features
+						// returns null to the CALLER too (that's the whole
+						// point of noopener - no reference back at all).
+						// Confirmed live: passing it straight through here
+						// left `popup` permanently null, so the
+						// `popup && ! popup.closed` guards below silently
+						// skipped every redirect and the tab just sat on
+						// about:blank forever, no matter what the mint
+						// request did. This tab's own window.opener does
+						// end up pointing back at this page as a result
+						// (dropped only for this one, same-site redirect -
+						// not a meaningful tabnabbing risk), which is the
+						// trade-off for being able to navigate it once the
+						// signed URL is minted.
+						var popup = originalWindowOpen.call( window, 'about:blank', target );
 
 						mintPreviewUrl( url )
 							.then( function ( signedUrl ) {
