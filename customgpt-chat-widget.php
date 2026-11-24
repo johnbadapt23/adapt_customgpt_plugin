@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.20.7
+ * Version: 2.20.8
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -10,6 +10,20 @@
 if ( ! defined( 'ABSPATH' ) ) {
 	exit; // No direct access.
 }
+
+/*
+ * Kept in sync with the "Version:" header above on every release -
+ * used only to salt proxy_citation_request()'s per-citation transient
+ * cache key (see CUSTOMGPT_WIDGET_CITATION_CACHE_SALT below), so a
+ * citation-rewriting-logic change (like the one that introduced this
+ * constant) can never be masked for up to a day by a stale cached
+ * response computed under the previous version's rules - confirmed
+ * live: v2.20.7's protected-reports rewrite was deployed and the
+ * widget was still showing the old, unrewritten URL for an already-
+ * cached citation, because nothing previously invalidated that cache
+ * on update.
+ */
+define( 'CUSTOMGPT_WIDGET_VERSION', '2.20.8' );
 
 /*
  * Credentials.
@@ -3965,7 +3979,7 @@ final class CustomGPT_Chat_Widget_Plugin {
 			&& isset( $_SERVER['REQUEST_METHOD'] )
 			&& 'GET' === strtoupper( sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) )
 		) {
-			$citation_cache_key = 'customgpt_widget_citation_' . $citation_match[1] . '_' . $citation_match[2];
+			$citation_cache_key = 'customgpt_widget_citation_' . str_replace( '.', '', CUSTOMGPT_WIDGET_VERSION ) . '_' . $citation_match[1] . '_' . $citation_match[2];
 			$this->proxy_citation_request( $url, $api_key, $citation_cache_key );
 			exit;
 		}
