@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.20.8
+ * Version: 2.20.9
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -23,7 +23,7 @@ if ( ! defined( 'ABSPATH' ) ) {
  * cached citation, because nothing previously invalidated that cache
  * on update.
  */
-define( 'CUSTOMGPT_WIDGET_VERSION', '2.20.8' );
+define( 'CUSTOMGPT_WIDGET_VERSION', '2.20.9' );
 
 /*
  * Credentials.
@@ -3616,6 +3616,83 @@ final class CustomGPT_Chat_Widget_Plugin {
 	}
 
 	/**
+	 * TEMPORARY diagnostic for resolve_gated_download_post_id_by_url() -
+	 * see the ?customgpt_debug_gate=1 branch in handle_proxy() above.
+	 * Fetches the citation live (never from cache) and reports, as plain
+	 * JSON, every intermediate value the real resolver computes against
+	 * this production database, so a live mismatch can be diagnosed
+	 * directly rather than guessed at. Remove this method and its call
+	 * site together once no longer needed.
+	 */
+	private function debug_gated_download_lookup( $url, $api_key ) {
+		$response = wp_remote_get(
+			$url,
+			array(
+				'headers' => array(
+					'Authorization' => 'Bearer ' . $api_key,
+					'Accept'        => 'application/json',
+				),
+				'timeout' => 15,
+			)
+		);
+
+		$citation_url = '';
+		if ( ! is_wp_error( $response ) ) {
+			$decoded      = json_decode( wp_remote_retrieve_body( $response ), true );
+			$citation_url = ( is_array( $decoded ) && ! empty( $decoded['data']['url'] ) ) ? (string) $decoded['data']['url'] : '';
+		}
+
+		$marker_hit = ( '' !== $citation_url ) && ( false !== strpos( $citation_url, self::GATED_UPLOADS_PATH_MARKER ) );
+		$filename   = $marker_hit ? basename( (string) wp_parse_url( $citation_url, PHP_URL_PATH ) ) : '';
+
+		global $wpdb;
+
+		$path1_rows = array();
+		if ( '' !== $filename ) {
+			$path1_rows = $wpdb->get_results(
+				$wpdb->prepare(
+					"SELECT post_id, meta_key, meta_value FROM {$wpdb->postmeta}
+					WHERE meta_key LIKE %s AND meta_value LIKE %s
+					ORDER BY post_id DESC LIMIT 5",
+					'%' . $wpdb->esc_like( 'download_url' ),
+					'%' . $wpdb->esc_like( $filename )
+				),
+				ARRAY_A
+			);
+		}
+
+		$attachment_matches = ( '' !== $filename ) ? $this->find_attachment_ids_by_exact_filenames( array( $filename ) ) : array();
+
+		$path23_rows = array();
+		if ( ! empty( $attachment_matches[ $filename ] ) ) {
+			$path23_rows = $wpdb->get_results(
+				$wpdb->prepare(
+					"SELECT post_id, meta_key, meta_value FROM {$wpdb->postmeta}
+					WHERE meta_key LIKE %s AND meta_value = %s
+					ORDER BY post_id DESC LIMIT 5",
+					'%' . $wpdb->esc_like( '_download' ),
+					(string) $attachment_matches[ $filename ]
+				),
+				ARRAY_A
+			);
+		}
+
+		status_header( 200 );
+		header( 'Content-Type: application/json' );
+		echo wp_json_encode( // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- diagnostic-only output, not rendered as HTML anywhere.
+			array(
+				'citation_url'       => $citation_url,
+				'marker_hit'         => $marker_hit,
+				'filename'           => $filename,
+				'path1_rows'         => $path1_rows,
+				'attachment_matches' => $attachment_matches,
+				'path23_rows'        => $path23_rows,
+				'resolved_post_id'   => $this->resolve_gated_download_post_id_by_url( $citation_url ),
+			)
+		);
+	}
+
+	/**
 	 * Fetches a single citation's details - a small, ordinary JSON
 	 * response, not a stream - and, when its title matches a filename
 	 * in this site's media library, rewrites the "url" field so the
@@ -3979,6 +4056,21 @@ final class CustomGPT_Chat_Widget_Plugin {
 			&& isset( $_SERVER['REQUEST_METHOD'] )
 			&& 'GET' === strtoupper( sanitize_text_field( wp_unslash( $_SERVER['REQUEST_METHOD'] ) ) )
 		) {
+			// TEMPORARY, to be removed once the protected-reports -> post ID
+			// lookup is confirmed working live: ?customgpt_debug_gate=1 on
+			// this same endpoint bypasses the normal cached proxy entirely
+			// and instead reports, as plain JSON, exactly what
+			// resolve_gated_download_post_id_by_url() sees when run against
+			// this citation's real URL right now - no admin auth required,
+			// since it only reveals which post (if any) a given public
+			// citation URL maps to, nothing sensitive. Lets this be
+			// diagnosed directly against the live production database
+			// without any server/DB access of its own.
+			if ( isset( $_GET['customgpt_debug_gate'] ) ) {
+				$this->debug_gated_download_lookup( $url, $api_key );
+				exit;
+			}
+
 			$citation_cache_key = 'customgpt_widget_citation_' . str_replace( '.', '', CUSTOMGPT_WIDGET_VERSION ) . '_' . $citation_match[1] . '_' . $citation_match[2];
 			$this->proxy_citation_request( $url, $api_key, $citation_cache_key );
 			exit;
