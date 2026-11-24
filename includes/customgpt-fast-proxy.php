@@ -306,6 +306,12 @@ exit;
  * @return bool True if the task reached "completed" and produced a reply.
  */
 function customgpt_fast_proxy_run_plan_act_task( $project_id, $prompt, $api_key, $api_base ) {
+	// See the matching comment in run_plan_act_task() in the main plugin
+	// file - the original /messages call's header callback already set
+	// the HTTP status to 400 before we knew we would end up here, and
+	// without resetting it the widget bundle's response.ok check would
+	// discard this valid reply unread.
+	http_response_code( 200 );
 	header( 'Content-Type: text/event-stream' );
 	header( 'Cache-Control: no-cache' );
 	header( 'Connection: keep-alive' );

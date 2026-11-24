@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.20.5
+ * Version: 2.20.6
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -4123,6 +4123,16 @@ final class CustomGPT_Chat_Widget_Plugin {
 	 * @return bool True if the task reached "completed" and produced a reply.
 	 */
 	private function run_plan_act_task( $project_id, $prompt, $api_key ) {
+		// The original /messages call's header callback already called
+		// status_header( 400 ) the instant CustomGPT's rejection arrived
+		// (that happens before we know whether we are even going to end
+		// up here) - nothing has been echoed since, so it is still safe
+		// to override. Skipping this would ship a 200-shaped SSE reply
+		// under a 400 status code, and the widget bundle checks
+		// response.ok before it ever calls getReader() on the body - so
+		// without this, every Plan & Act answer this method builds would
+		// be silently discarded unread, never a cosmetic-only mismatch.
+		status_header( 200 );
 		header( 'Content-Type: text/event-stream' );
 		header( 'Cache-Control: no-cache' );
 		header( 'Connection: keep-alive' );
