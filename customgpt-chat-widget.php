@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.20.9
+ * Version: 2.20.10
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -23,7 +23,7 @@ if ( ! defined( 'ABSPATH' ) ) {
  * cached citation, because nothing previously invalidated that cache
  * on update.
  */
-define( 'CUSTOMGPT_WIDGET_VERSION', '2.20.9' );
+define( 'CUSTOMGPT_WIDGET_VERSION', '2.20.10' );
 
 /*
  * Credentials.
@@ -3636,11 +3636,27 @@ final class CustomGPT_Chat_Widget_Plugin {
 			)
 		);
 
-		$citation_url = '';
+		$raw_citation_url = '';
+		$citation_title   = '';
 		if ( ! is_wp_error( $response ) ) {
-			$decoded      = json_decode( wp_remote_retrieve_body( $response ), true );
-			$citation_url = ( is_array( $decoded ) && ! empty( $decoded['data']['url'] ) ) ? (string) $decoded['data']['url'] : '';
+			$decoded         = json_decode( wp_remote_retrieve_body( $response ), true );
+			$raw_citation_url = ( is_array( $decoded ) && ! empty( $decoded['data']['url'] ) ) ? (string) $decoded['data']['url'] : '';
+			$citation_title   = ( is_array( $decoded ) && ! empty( $decoded['data']['title'] ) ) ? (string) $decoded['data']['title'] : '';
 		}
+
+		// Mirror proxy_citation_request()'s own logic exactly: the raw
+		// CustomGPT API "url" is almost never the blocked local path on
+		// its own (it's usually CustomGPT's own app.customgpt.ai preview
+		// link) - it only becomes the blocked local URL AFTER
+		// find_local_media_url_by_filename() rewrites it, by matching the
+		// citation's TITLE against this site's media library. Checking
+		// the raw, pre-rewrite URL here (as an earlier version of this
+		// diagnostic did) always reported marker_hit = false and
+		// resolved_post_id = 0, even when the real, full pipeline's
+		// rewritten URL matched correctly - it was testing the wrong
+		// stage.
+		$local_match  = ( '' !== $citation_title ) ? $this->find_local_media_url_by_filename( $citation_title ) : null;
+		$citation_url = $local_match ? $local_match['url'] : $raw_citation_url;
 
 		$marker_hit = ( '' !== $citation_url ) && ( false !== strpos( $citation_url, self::GATED_UPLOADS_PATH_MARKER ) );
 		$filename   = $marker_hit ? basename( (string) wp_parse_url( $citation_url, PHP_URL_PATH ) ) : '';
@@ -3681,6 +3697,9 @@ final class CustomGPT_Chat_Widget_Plugin {
 		header( 'Content-Type: application/json' );
 		echo wp_json_encode( // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- diagnostic-only output, not rendered as HTML anywhere.
 			array(
+				'raw_citation_url'   => $raw_citation_url,
+				'citation_title'     => $citation_title,
+				'local_match'        => $local_match,
 				'citation_url'       => $citation_url,
 				'marker_hit'         => $marker_hit,
 				'filename'           => $filename,
