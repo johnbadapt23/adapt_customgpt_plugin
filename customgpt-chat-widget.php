@@ -2,7 +2,7 @@
 /**
  * Plugin Name: CustomGPT Chat Widget
  * Description: Renders the CustomGPT.ai starter-kit chat widget via a [customgpt_chat] shortcode, self-hosted from this plugin's dist/widget/ folder (not jsDelivr). The widget renders directly into the page DOM (no iframe), so it's styleable with plain CSS. API requests are routed through a server-side proxy so the API key never reaches the browser.
- * Version: 2.20.4
+ * Version: 2.20.5
  * Author: ADAPT
  * Update URI: https://github.com/johnbadapt23/adapt_customgpt_plugin
  */
@@ -4031,12 +4031,21 @@ final class CustomGPT_Chat_Widget_Plugin {
 		}
 
 		// Transparent "Plan & Act" fallback: if what we held back above
-		// turns out to actually be that specific error, retry against
-		// .../tasks (as the error itself says to) and stream THAT
-		// response to the widget instead - it never needs to know the
-		// first call failed. Anything else buffered for the same reason
-		// (a 400 for some other cause) is relayed through unchanged, so
-		// this can't swallow a real error.
+		// turns out to actually be that specific error, run the prompt
+		// through CustomGPT's real Plan & Act flow instead (POST
+		// /projects/{id}/tasks, then poll /projects/{id}/tasks/{taskId}
+		// until it finishes - confirmed live against the STAGING agent;
+		// this is a completely different, non-streaming, poll-based API
+		// with no conversation/session id of its own, NOT a same-shaped
+		// endpoint at the same path with "tasks" swapped in for
+		// "messages") and translate its result into the same small SSE
+		// vocabulary the widget bundle already understands
+		// (data: {"content":...}/{"citations":...} chunks, ended by a
+		// literal "event: finish" line - see run_plan_act_task() for
+		// where that vocabulary comes from). Anything else buffered for
+		// the same reason (a 400 for some other cause) is relayed
+		// through unchanged, so this can't swallow a real error.
+		$plan_act_task_succeeded = false;
 		if ( $is_send_message && '' !== $plan_act_buffer ) {
 			$decoded_error     = json_decode( $plan_act_buffer, true );
 			$is_plan_act_error = is_array( $decoded_error )
@@ -4044,82 +4053,229 @@ final class CustomGPT_Chat_Widget_Plugin {
 				&& false !== stripos( (string) $decoded_error['data']['message'], 'Plan & Act' )
 				&& false !== stripos( (string) $decoded_error['data']['message'], '/tasks' );
 
-			if ( $is_plan_act_error ) {
-				$tasks_url = preg_replace( '#/conversations/([^/?]+)/messages(\?|$)#', '/conversations/$1/tasks$2', $url, 1 );
+			if ( $is_plan_act_error && preg_match( '#^/projects/(\d+)/#', $path, $project_match ) ) {
+				$decoded_request = json_decode( (string) $raw_body, true );
+				$prompt          = is_array( $decoded_request ) && isset( $decoded_request['prompt'] ) ? (string) $decoded_request['prompt'] : '';
 
-				$retry_headers_sent = false;
-				$retry_sse_padded   = false;
-
-				$retry_ch = curl_init( $tasks_url );
-				curl_setopt_array(
-					$retry_ch,
-					array(
-						CURLOPT_CUSTOMREQUEST  => $method,
-						CURLOPT_HTTPHEADER     => $headers,
-						CURLOPT_TIMEOUT        => 120,
-						CURLOPT_HEADERFUNCTION => function ( $curl_handle, $header_line ) use ( &$retry_headers_sent, &$retry_sse_padded, &$response_status ) {
-							if ( 0 === stripos( $header_line, 'HTTP/' ) && preg_match( '#HTTP/\S+\s+(\d+)#', $header_line, $m ) ) {
-								$response_status = (int) $m[1];
-								status_header( $response_status );
-							}
-
-							if ( 0 === stripos( $header_line, 'content-type:' ) ) {
-								header( trim( $header_line ) );
-								if ( false !== stripos( $header_line, 'text/event-stream' ) ) {
-									header( 'Cache-Control: no-cache' );
-									header( 'Connection: keep-alive' );
-									if ( ! $retry_sse_padded ) {
-										echo ':' . base64_encode( random_bytes( 65536 ) ) . "\n\n"; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- SSE comment padding, not user data.
-										flush();
-										$retry_sse_padded = true;
-									}
-								}
-								$retry_headers_sent = true;
-							}
-
-							return strlen( $header_line );
-						},
-						CURLOPT_WRITEFUNCTION  => function ( $curl_handle, $chunk ) {
-							echo $chunk; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- raw upstream API passthrough (JSON / SSE), retried via /tasks.
-							flush();
-							return strlen( $chunk );
-						},
-					)
-				);
-
-				if ( in_array( $method, array( 'POST', 'PUT', 'PATCH' ), true ) && '' !== $raw_body ) {
-					curl_setopt( $retry_ch, CURLOPT_POSTFIELDS, $raw_body );
-				}
-
-				curl_exec( $retry_ch );
-
-				if ( curl_errno( $retry_ch ) && ! $retry_headers_sent ) {
-					status_header( 502 );
-					header( 'Content-Type: application/json' );
-					echo wp_json_encode(
-						array(
-							'error'   => 'Proxy request failed',
-							'details' => curl_error( $retry_ch ),
-						)
-					);
-				}
-
-				curl_close( $retry_ch );
+				$plan_act_task_succeeded = $this->run_plan_act_task( (int) $project_match[1], $prompt, $api_key );
 			} else {
-				// Not the Plan & Act case after all - relay the buffered
-				// error through exactly as the non-buffered path always
-				// has.
+				// Not the Plan & Act case after all (or the path didn't
+				// contain a project id, which should never happen for a
+				// send-message call) - relay the buffered error through
+				// exactly as the non-buffered path always has.
 				echo $plan_act_buffer; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- raw upstream API passthrough (JSON).
 				flush();
 			}
 		}
 
-		if ( $is_send_message && $response_status >= 200 && $response_status < 300 ) {
+		if ( $plan_act_task_succeeded || ( $is_send_message && $response_status >= 200 && $response_status < 300 ) ) {
 			$this->record_chat_message( get_current_user_id() );
 		}
 
 		curl_close( $ch );
 		exit;
+	}
+
+	/**
+	 * Runs one prompt through CustomGPT's Plan & Act task API and
+	 * streams the result to the browser using the same small SSE
+	 * vocabulary the widget bundle's own stream parser already knows
+	 * (confirmed by reading dist/widget/customgpt-widget.b16.min.js
+	 * directly, not guessed): a line "data: " followed by a JSON object
+	 * with a "content" and/or "citations" key is appended to the
+	 * in-progress reply, and a literal "event: finish" line ends it.
+	 * That is a different, much smaller vocabulary than the real
+	 * Plan & Act task JSON this method is reading on the other end (see
+	 * below) - this method's whole job is translating one into the
+	 * other.
+	 *
+	 * Plan & Act tasks are NOT a drop-in replacement for the normal
+	 * "send message" endpoint - confirmed live against the STAGING
+	 * agent (project 101914) before writing this method, not assumed
+	 * from the error text alone:
+	 *   - POST /projects/{id}/tasks takes only a "prompt" (and some
+	 *     optional fields this plugin doesn't need); it does NOT take a
+	 *     conversation/session id at all, so a Plan & Act reply is
+	 *     never attached to the widget's existing conversation the way
+	 *     a normal message is.
+	 *   - It responds immediately (202) with just a task id
+	 *     ({"data":{"id":...}}), not an answer.
+	 *   - The answer only shows up from polling
+	 *     GET /projects/{id}/tasks/{taskId}, which returns any new
+	 *     "events" since the last poll while status is "processing"
+	 *     (progress text arrives token-by-token as {"type":"progress",
+	 *     "data":{"message":...}} events, which this method forwards to
+	 *     the widget as they arrive so the reply still appears to
+	 *     stream), and once status is "completed" also returns a
+	 *     {"type":"finish","data":{"response":...,"citations":[...]}}
+	 *     event carrying the full final text and citation ids - the
+	 *     citation ids are plain integers, the same shape the existing
+	 *     citation "View source" proxying elsewhere in this file already
+	 *     expects, so citations on a Plan & Act answer work the same way
+	 *     for free. A completed task's result is consumed the first time
+	 *     it's read (confirmed: polling again afterwards 404s), so this
+	 *     method is careful to use what a poll returns immediately
+	 *     rather than re-fetching it.
+	 *
+	 * @param int    $project_id CustomGPT agent/project id.
+	 * @param string $prompt     The user's message text.
+	 * @param string $api_key    CustomGPT API key (same one handle_proxy() uses).
+	 * @return bool True if the task reached "completed" and produced a reply.
+	 */
+	private function run_plan_act_task( $project_id, $prompt, $api_key ) {
+		header( 'Content-Type: text/event-stream' );
+		header( 'Cache-Control: no-cache' );
+		header( 'Connection: keep-alive' );
+		// Same reasoning as the SSE padding in handle_proxy() itself -
+		// forces an early flush through any gzip buffering still sitting
+		// in front of this response.
+		echo ':' . base64_encode( random_bytes( 65536 ) ) . "\n\n"; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- SSE comment padding, not user data.
+		flush();
+
+		$send_chunk = function ( $payload ) {
+			echo 'data: ' . wp_json_encode( $payload ) . "\n\n"; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- JSON built from trusted values (our own encode), not raw passthrough here.
+			flush();
+		};
+		$send_finish = function () {
+			echo "event: finish\ndata:\n\n";
+			flush();
+		};
+
+		$headers = array(
+			'Authorization: Bearer ' . $api_key,
+			'Accept: application/json',
+			'Content-Type: application/json',
+		);
+
+		$create_ch = curl_init( CUSTOMGPT_API_BASE . '/projects/' . $project_id . '/tasks' );
+		curl_setopt_array(
+			$create_ch,
+			array(
+				CURLOPT_CUSTOMREQUEST => 'POST',
+				CURLOPT_HTTPHEADER    => $headers,
+				CURLOPT_POSTFIELDS    => wp_json_encode( array( 'prompt' => $prompt ) ),
+				CURLOPT_RETURNTRANSFER => true,
+				CURLOPT_TIMEOUT       => 30,
+			)
+		);
+		$create_response = curl_exec( $create_ch );
+		$create_errno     = curl_errno( $create_ch );
+		curl_close( $create_ch );
+
+		$task_id = null;
+		if ( ! $create_errno && is_string( $create_response ) ) {
+			$decoded_create = json_decode( $create_response, true );
+			$task_id        = $decoded_create['data']['id'] ?? null;
+		}
+
+		if ( empty( $task_id ) ) {
+			$send_chunk( array( 'content' => "Sorry, I couldn't start that task just now. Please try again in a moment." ) );
+			$send_finish();
+			return false;
+		}
+
+		$poll_url          = CUSTOMGPT_API_BASE . '/projects/' . $project_id . '/tasks/' . rawurlencode( (string) $task_id );
+		$poll_headers      = array(
+			'Authorization: Bearer ' . $api_key,
+			'Accept: application/json',
+		);
+		$any_content_sent  = false;
+		$citations         = array();
+		$succeeded         = false;
+		$task_status       = null;
+		$deadline          = time() + 170; // Generous, but bounded - see class docblock reasoning above on why this can't just be the normal endpoint's own 120s curl timeout (there's no single upstream call here to attach that timeout to).
+
+		while ( time() < $deadline ) {
+			$poll_ch = curl_init( $poll_url );
+			curl_setopt_array(
+				$poll_ch,
+				array(
+					CURLOPT_HTTPHEADER     => $poll_headers,
+					CURLOPT_RETURNTRANSFER => true,
+					CURLOPT_TIMEOUT        => 15,
+				)
+			);
+			$poll_response = curl_exec( $poll_ch );
+			$poll_errno    = curl_errno( $poll_ch );
+			curl_close( $poll_ch );
+
+			if ( $poll_errno || ! is_string( $poll_response ) ) {
+				usleep( 1500000 );
+				continue;
+			}
+
+			$decoded_poll = json_decode( $poll_response, true );
+			$task_status  = $decoded_poll['data']['status'] ?? null;
+			$events       = $decoded_poll['data']['events'] ?? array();
+
+			if ( is_array( $events ) ) {
+				foreach ( $events as $event ) {
+					$event_type = $event['type'] ?? '';
+					$event_data = $event['data'] ?? array();
+
+					if ( 'progress' === $event_type && '' !== (string) ( $event_data['message'] ?? '' ) ) {
+						$send_chunk( array( 'content' => (string) $event_data['message'] ) );
+						$any_content_sent = true;
+					} elseif ( 'finish' === $event_type ) {
+						$citations = is_array( $event_data['citations'] ?? null ) ? $event_data['citations'] : array();
+						// Only used as a fallback for the (so far unseen
+						// in testing, but not impossible) case where a
+						// task completes without ever emitting a single
+						// "progress" event - otherwise this would
+						// duplicate the reply, since "finish"'s own
+						// "response" field is the SAME full text the
+						// "progress" events already streamed piece by
+						// piece, confirmed by diffing the two during
+						// testing.
+						if ( ! $any_content_sent && '' !== (string) ( $event_data['response'] ?? '' ) ) {
+							$send_chunk( array( 'content' => (string) $event_data['response'] ) );
+							$any_content_sent = true;
+						}
+					}
+					// Other event types seen in testing ("task", "todo")
+					// are Plan & Act's own progress/artifact bookkeeping,
+					// not reply text - intentionally not forwarded.
+				}
+			}
+
+			if ( 'completed' === $task_status ) {
+				$succeeded = true;
+				break;
+			}
+
+			if ( 'failed' === $task_status ) {
+				if ( ! $any_content_sent ) {
+					$send_chunk( array( 'content' => "Sorry, I wasn't able to complete that request. Please try again." ) );
+				}
+				break;
+			}
+
+			if ( 'awaiting_tool_results' === $task_status ) {
+				// This agent's current Actions don't define any
+				// function-calling tools (confirmed in the dashboard),
+				// so this shouldn't come up in practice - but this proxy
+				// has no sandboxed tool-execution capability to answer
+				// it with regardless, so fail gracefully rather than
+				// hang until the 2-hour window CustomGPT holds it open
+				// for expires.
+				$send_chunk( array( 'content' => 'Sorry, this request needs a tool this chat widget doesn\'t support yet.' ) );
+				break;
+			}
+
+			usleep( 1500000 );
+		}
+
+		if ( ! $succeeded && 'completed' !== ( $task_status ?? null ) && time() >= $deadline ) {
+			$send_chunk( array( 'content' => 'Sorry, this is taking longer than expected. Please try again.' ) );
+		}
+
+		if ( ! empty( $citations ) ) {
+			$send_chunk( array( 'citations' => $citations ) );
+		}
+
+		$send_finish();
+
+		return $succeeded;
 	}
 }
 

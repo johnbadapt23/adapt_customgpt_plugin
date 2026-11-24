@@ -254,11 +254,15 @@ if ( curl_errno( $ch ) && ! $headers_sent ) {
 	echo json_encode( array( 'error' => 'Proxy request failed', 'details' => curl_error( $ch ) ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
 }
 
-// Transparent "Plan & Act" fallback - see the long comment above. Retry
-// against .../tasks (as the error itself says to) and stream THAT
-// response to the widget instead; anything else buffered for the same
-// reason (a 400 for some other cause) is relayed through unchanged, so
-// this can't swallow a real error.
+// Transparent "Plan & Act" fallback. Mirrors
+// CustomGPT_Chat_Widget_Plugin::run_plan_act_task() in the main plugin
+// file (customgpt-chat-widget.php) - see that method's own docblock for
+// the full explanation of why Plan & Act needs a real task-creation +
+// polling flow rather than a simple endpoint swap, confirmed live
+// against the STAGING agent before either copy of this was written.
+// Duplicated here as a plain function, not a call into the class,
+// because nothing from this plugin's class exists yet at this mu-plugin
+// stage (see the file-level comment at the top of this file).
 if ( $is_send_message && '' !== $plan_act_buffer ) {
 	$decoded_error     = json_decode( $plan_act_buffer, true );
 	$is_plan_act_error = is_array( $decoded_error )
@@ -266,59 +270,16 @@ if ( $is_send_message && '' !== $plan_act_buffer ) {
 		&& false !== stripos( (string) $decoded_error['data']['message'], 'Plan & Act' )
 		&& false !== stripos( (string) $decoded_error['data']['message'], '/tasks' );
 
-	if ( $is_plan_act_error ) {
-		$tasks_url = preg_replace( '#/conversations/([^/?]+)/messages(\?|$)#', '/conversations/$1/tasks$2', $url, 1 );
+	if ( $is_plan_act_error && preg_match( '#^/projects/(\d+)/#', $path, $project_match ) ) {
+		$decoded_request = json_decode( (string) $raw_body, true );
+		$prompt          = is_array( $decoded_request ) && isset( $decoded_request['prompt'] ) ? (string) $decoded_request['prompt'] : '';
 
-		$retry_headers_sent = false;
-		$retry_sse_padded   = false;
-
-		$retry_ch = curl_init( $tasks_url );
-		curl_setopt_array(
-			$retry_ch,
-			array(
-				CURLOPT_CUSTOMREQUEST  => 'POST',
-				CURLOPT_HTTPHEADER     => $headers,
-				CURLOPT_TIMEOUT        => 120,
-				CURLOPT_POSTFIELDS     => $raw_body,
-				CURLOPT_HEADERFUNCTION => function ( $curl_handle, $header_line ) use ( &$retry_headers_sent, &$retry_sse_padded ) {
-					if ( 0 === stripos( $header_line, 'HTTP/' ) && preg_match( '#HTTP/\S+\s+(\d+)#', $header_line, $m ) ) {
-						http_response_code( (int) $m[1] );
-					}
-					if ( 0 === stripos( $header_line, 'content-type:' ) ) {
-						header( trim( $header_line ) );
-						if ( false !== stripos( $header_line, 'text/event-stream' ) ) {
-							header( 'Cache-Control: no-cache' );
-							header( 'Connection: keep-alive' );
-							if ( ! $retry_sse_padded ) {
-								echo ':' . base64_encode( random_bytes( 65536 ) ) . "\n\n"; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- SSE comment padding, not user data.
-								flush();
-								$retry_sse_padded = true;
-							}
-						}
-						$retry_headers_sent = true;
-					}
-					return strlen( $header_line );
-				},
-				CURLOPT_WRITEFUNCTION  => function ( $curl_handle, $chunk ) {
-					echo $chunk; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- raw upstream API passthrough (JSON / SSE), retried via /tasks.
-					flush();
-					return strlen( $chunk );
-				},
-			)
-		);
-
-		curl_exec( $retry_ch );
-
-		if ( curl_errno( $retry_ch ) && ! $retry_headers_sent ) {
-			http_response_code( 502 );
-			header( 'Content-Type: application/json' );
-			echo json_encode( array( 'error' => 'Proxy request failed', 'details' => curl_error( $retry_ch ) ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
-		}
-
-		curl_close( $retry_ch );
+		customgpt_fast_proxy_run_plan_act_task( (int) $project_match[1], $prompt, $api_key, $api_base );
 	} else {
-		// Not the Plan & Act case after all - relay the buffered error
-		// through exactly as the non-buffered path always has.
+		// Not the Plan & Act case after all (or the path didn't contain
+		// a project id, which should never happen for a send-message
+		// call) - relay the buffered error through exactly as the
+		// non-buffered path always has.
 		echo $plan_act_buffer; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- raw upstream API passthrough (JSON).
 		flush();
 	}
@@ -326,3 +287,155 @@ if ( $is_send_message && '' !== $plan_act_buffer ) {
 
 curl_close( $ch );
 exit;
+
+/**
+ * See CustomGPT_Chat_Widget_Plugin::run_plan_act_task() in
+ * customgpt-chat-widget.php for the full explanation - this is the same
+ * logic, duplicated as a plain function for this early mu-plugin stage
+ * (no class available yet). Translates CustomGPT's real, poll-based
+ * Plan & Act task API into the small SSE vocabulary the widget bundle's
+ * own stream parser understands (data: {"content"/"citations":...}
+ * chunks, ended by a literal "event: finish" line).
+ *
+ * @param int    $project_id CustomGPT agent/project id.
+ * @param string $prompt     The user's message text.
+ * @param string $api_key    CustomGPT API key.
+ * @param string $api_base   CUSTOMGPT_API_BASE (passed in rather than
+ *                           read as a constant here, matching this
+ *                           file's existing $api_base variable above).
+ * @return bool True if the task reached "completed" and produced a reply.
+ */
+function customgpt_fast_proxy_run_plan_act_task( $project_id, $prompt, $api_key, $api_base ) {
+	header( 'Content-Type: text/event-stream' );
+	header( 'Cache-Control: no-cache' );
+	header( 'Connection: keep-alive' );
+	echo ':' . base64_encode( random_bytes( 65536 ) ) . "\n\n"; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- SSE comment padding, not user data.
+	flush();
+
+	$send_chunk = function ( $payload ) {
+		// Native json_encode(), not wp_json_encode() - see the file-level
+		// comment at the top of this file on why this file avoids
+		// WordPress functions this early.
+		echo 'data: ' . json_encode( $payload ) . "\n\n"; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+		flush();
+	};
+	$send_finish = function () {
+		echo "event: finish\ndata:\n\n";
+		flush();
+	};
+
+	$create_ch = curl_init( $api_base . '/projects/' . $project_id . '/tasks' );
+	curl_setopt_array(
+		$create_ch,
+		array(
+			CURLOPT_CUSTOMREQUEST  => 'POST',
+			CURLOPT_HTTPHEADER     => array(
+				'Authorization: Bearer ' . $api_key,
+				'Accept: application/json',
+				'Content-Type: application/json',
+			),
+			CURLOPT_POSTFIELDS     => json_encode( array( 'prompt' => $prompt ) ), // phpcs:ignore WordPress.WP.AlternativeFunctions.json_encode_json_encode
+			CURLOPT_RETURNTRANSFER => true,
+			CURLOPT_TIMEOUT        => 30,
+		)
+	);
+	$create_response = curl_exec( $create_ch );
+	$create_errno     = curl_errno( $create_ch );
+	curl_close( $create_ch );
+
+	$task_id = null;
+	if ( ! $create_errno && is_string( $create_response ) ) {
+		$decoded_create = json_decode( $create_response, true );
+		$task_id        = $decoded_create['data']['id'] ?? null;
+	}
+
+	if ( empty( $task_id ) ) {
+		$send_chunk( array( 'content' => "Sorry, I couldn't start that task just now. Please try again in a moment." ) );
+		$send_finish();
+		return false;
+	}
+
+	$poll_url         = $api_base . '/projects/' . $project_id . '/tasks/' . rawurlencode( (string) $task_id );
+	$poll_headers     = array(
+		'Authorization: Bearer ' . $api_key,
+		'Accept: application/json',
+	);
+	$any_content_sent = false;
+	$citations        = array();
+	$succeeded        = false;
+	$task_status      = null;
+	$deadline         = time() + 170;
+
+	while ( time() < $deadline ) {
+		$poll_ch = curl_init( $poll_url );
+		curl_setopt_array(
+			$poll_ch,
+			array(
+				CURLOPT_HTTPHEADER     => $poll_headers,
+				CURLOPT_RETURNTRANSFER => true,
+				CURLOPT_TIMEOUT        => 15,
+			)
+		);
+		$poll_response = curl_exec( $poll_ch );
+		$poll_errno    = curl_errno( $poll_ch );
+		curl_close( $poll_ch );
+
+		if ( $poll_errno || ! is_string( $poll_response ) ) {
+			usleep( 1500000 );
+			continue;
+		}
+
+		$decoded_poll = json_decode( $poll_response, true );
+		$task_status  = $decoded_poll['data']['status'] ?? null;
+		$events       = $decoded_poll['data']['events'] ?? array();
+
+		if ( is_array( $events ) ) {
+			foreach ( $events as $event ) {
+				$event_type = $event['type'] ?? '';
+				$event_data = $event['data'] ?? array();
+
+				if ( 'progress' === $event_type && '' !== (string) ( $event_data['message'] ?? '' ) ) {
+					$send_chunk( array( 'content' => (string) $event_data['message'] ) );
+					$any_content_sent = true;
+				} elseif ( 'finish' === $event_type ) {
+					$citations = is_array( $event_data['citations'] ?? null ) ? $event_data['citations'] : array();
+					if ( ! $any_content_sent && '' !== (string) ( $event_data['response'] ?? '' ) ) {
+						$send_chunk( array( 'content' => (string) $event_data['response'] ) );
+						$any_content_sent = true;
+					}
+				}
+			}
+		}
+
+		if ( 'completed' === $task_status ) {
+			$succeeded = true;
+			break;
+		}
+
+		if ( 'failed' === $task_status ) {
+			if ( ! $any_content_sent ) {
+				$send_chunk( array( 'content' => "Sorry, I wasn't able to complete that request. Please try again." ) );
+			}
+			break;
+		}
+
+		if ( 'awaiting_tool_results' === $task_status ) {
+			$send_chunk( array( 'content' => 'Sorry, this request needs a tool this chat widget doesn\'t support yet.' ) );
+			break;
+		}
+
+		usleep( 1500000 );
+	}
+
+	if ( ! $succeeded && 'completed' !== $task_status && time() >= $deadline ) {
+		$send_chunk( array( 'content' => 'Sorry, this is taking longer than expected. Please try again.' ) );
+	}
+
+	if ( ! empty( $citations ) ) {
+		$send_chunk( array( 'citations' => $citations ) );
+	}
+
+	$send_finish();
+
+	return $succeeded;
+}
