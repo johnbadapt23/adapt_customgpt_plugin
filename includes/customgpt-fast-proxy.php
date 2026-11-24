@@ -175,8 +175,19 @@ header( 'Cache-Control: no-cache, no-store, must-revalidate' );
 // against the normal admin-ajax.php path. Safe to leave in permanently.
 header( 'X-CGPT-Fast-Proxy: 1' );
 
-$headers_sent = false;
-$sse_padded   = false;
+$headers_sent    = false;
+$sse_padded      = false;
+$response_status = 0;
+
+// Mirrors the equivalent fallback in the normal handle_proxy() path
+// (customgpt-chat-widget.php): some CustomGPT agents have "Plan & Act"
+// mode turned on, where POST .../messages always 400s with a small,
+// non-streamed JSON body telling the caller to use .../tasks instead.
+// $is_event_stream/$plan_act_buffer hold that one specific response
+// back just long enough to check it, rather than relaying the error
+// straight through to the widget.
+$is_event_stream = false;
+$plan_act_buffer = '';
 
 $ch = curl_init( $url );
 curl_setopt_array(
@@ -186,13 +197,15 @@ curl_setopt_array(
 		CURLOPT_HTTPHEADER     => $headers,
 		CURLOPT_TIMEOUT        => 120,
 		CURLOPT_POSTFIELDS     => $raw_body,
-		CURLOPT_HEADERFUNCTION => function ( $curl_handle, $header_line ) use ( &$headers_sent, &$sse_padded ) {
+		CURLOPT_HEADERFUNCTION => function ( $curl_handle, $header_line ) use ( &$headers_sent, &$sse_padded, &$response_status, &$is_event_stream ) {
 			if ( 0 === stripos( $header_line, 'HTTP/' ) && preg_match( '#HTTP/\S+\s+(\d+)#', $header_line, $m ) ) {
-				http_response_code( (int) $m[1] );
+				$response_status = (int) $m[1];
+				http_response_code( $response_status );
 			}
 			if ( 0 === stripos( $header_line, 'content-type:' ) ) {
 				header( trim( $header_line ) );
 				if ( false !== stripos( $header_line, 'text/event-stream' ) ) {
+					$is_event_stream = true;
 					header( 'Cache-Control: no-cache' );
 					header( 'Connection: keep-alive' );
 					// Repeated spaces compress down to almost nothing
@@ -218,7 +231,11 @@ curl_setopt_array(
 			}
 			return strlen( $header_line );
 		},
-		CURLOPT_WRITEFUNCTION  => function ( $curl_handle, $chunk ) {
+		CURLOPT_WRITEFUNCTION  => function ( $curl_handle, $chunk ) use ( &$plan_act_buffer, &$response_status, &$is_event_stream, $is_send_message ) {
+			if ( $is_send_message && ! $is_event_stream && 400 === $response_status ) {
+				$plan_act_buffer .= $chunk;
+				return strlen( $chunk );
+			}
 			echo $chunk; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- raw upstream API passthrough (JSON / SSE).
 			flush();
 			return strlen( $chunk );
@@ -235,6 +252,76 @@ if ( curl_errno( $ch ) && ! $headers_sent ) {
 	// WordPress function that isn't get_option()/curl, checked above, so
 	// nothing here can hard-fatal even in edge-case bootstrap orderings.
 	echo json_encode( array( 'error' => 'Proxy request failed', 'details' => curl_error( $ch ) ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+}
+
+// Transparent "Plan & Act" fallback - see the long comment above. Retry
+// against .../tasks (as the error itself says to) and stream THAT
+// response to the widget instead; anything else buffered for the same
+// reason (a 400 for some other cause) is relayed through unchanged, so
+// this can't swallow a real error.
+if ( $is_send_message && '' !== $plan_act_buffer ) {
+	$decoded_error     = json_decode( $plan_act_buffer, true );
+	$is_plan_act_error = is_array( $decoded_error )
+		&& isset( $decoded_error['data']['message'] )
+		&& false !== stripos( (string) $decoded_error['data']['message'], 'Plan & Act' )
+		&& false !== stripos( (string) $decoded_error['data']['message'], '/tasks' );
+
+	if ( $is_plan_act_error ) {
+		$tasks_url = preg_replace( '#/conversations/([^/?]+)/messages(\?|$)#', '/conversations/$1/tasks$2', $url, 1 );
+
+		$retry_headers_sent = false;
+		$retry_sse_padded   = false;
+
+		$retry_ch = curl_init( $tasks_url );
+		curl_setopt_array(
+			$retry_ch,
+			array(
+				CURLOPT_CUSTOMREQUEST  => 'POST',
+				CURLOPT_HTTPHEADER     => $headers,
+				CURLOPT_TIMEOUT        => 120,
+				CURLOPT_POSTFIELDS     => $raw_body,
+				CURLOPT_HEADERFUNCTION => function ( $curl_handle, $header_line ) use ( &$retry_headers_sent, &$retry_sse_padded ) {
+					if ( 0 === stripos( $header_line, 'HTTP/' ) && preg_match( '#HTTP/\S+\s+(\d+)#', $header_line, $m ) ) {
+						http_response_code( (int) $m[1] );
+					}
+					if ( 0 === stripos( $header_line, 'content-type:' ) ) {
+						header( trim( $header_line ) );
+						if ( false !== stripos( $header_line, 'text/event-stream' ) ) {
+							header( 'Cache-Control: no-cache' );
+							header( 'Connection: keep-alive' );
+							if ( ! $retry_sse_padded ) {
+								echo ':' . base64_encode( random_bytes( 65536 ) ) . "\n\n"; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- SSE comment padding, not user data.
+								flush();
+								$retry_sse_padded = true;
+							}
+						}
+						$retry_headers_sent = true;
+					}
+					return strlen( $header_line );
+				},
+				CURLOPT_WRITEFUNCTION  => function ( $curl_handle, $chunk ) {
+					echo $chunk; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- raw upstream API passthrough (JSON / SSE), retried via /tasks.
+					flush();
+					return strlen( $chunk );
+				},
+			)
+		);
+
+		curl_exec( $retry_ch );
+
+		if ( curl_errno( $retry_ch ) && ! $retry_headers_sent ) {
+			http_response_code( 502 );
+			header( 'Content-Type: application/json' );
+			echo json_encode( array( 'error' => 'Proxy request failed', 'details' => curl_error( $retry_ch ) ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+		}
+
+		curl_close( $retry_ch );
+	} else {
+		// Not the Plan & Act case after all - relay the buffered error
+		// through exactly as the non-buffered path always has.
+		echo $plan_act_buffer; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- raw upstream API passthrough (JSON).
+		flush();
+	}
 }
 
 curl_close( $ch );
